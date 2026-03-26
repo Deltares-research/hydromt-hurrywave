@@ -1,0 +1,57 @@
+[build-system]
+requires = ["flit_core >=3.4.0,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "hydromt_hurrywave"
+authors = [
+    {name = "Maarten van Ormondt", email = "maarten.vanormondt@deltares-usa.us"},
+]
+dependencies = [
+    "affine",
+    "geopandas>1.0",
+    "hydromt>=1.3.0,<2.0",
+    "numpy",
+    "pandas<3.0.0",
+    "pydantic",
+    "pydantic-settings",
+    "pyproj",
+    "scipy",
+    "shapely",
+    "xarray",
+    "xugrid>=0.14, <1.0",
+    "hydromt",
+]
+requires-python = ">=3.11"
+readme = "README.rst"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+]
+dynamic = ["version", "description"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[project.entry-points."hydromt.models"]
+hurrywave = "hydromt_hurrywave.hurrywave"
+
+[tool.flit.module]
+name = "hydromt_hurrywave"
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
