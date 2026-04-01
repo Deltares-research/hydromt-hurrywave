@@ -135,6 +135,7 @@ class HurrywaveBoundaryConditions(ModelComponent):
         # Determine mode from config: if bspfile is set → spectra
         bspfile = self.model.config.get("bspfile")
         if bspfile is not None:
+            # Boundary spectra take precedence if bspfile is set, even if bhsfile etc. are also set
             self.forcing = "spectra"
             self._read_boundary_spectra()
         else:
@@ -471,7 +472,7 @@ class HurrywaveBoundaryConditions(ModelComponent):
             Maximum distance to the next cell to be considered part of the
             same polyline.  Defaults to ``2 * dx``.
         """
-        mask = self.model.quadtree_mask.data
+        mask = self.model.quadtree_mask.data.mask
         if mask is None:
             raise ValueError("Mask must be loaded before generating boundary points.")
 
