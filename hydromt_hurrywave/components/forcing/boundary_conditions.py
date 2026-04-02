@@ -90,20 +90,23 @@ class HurrywaveBoundaryConditions(ModelComponent):
         return self._data
 
     def _initialize(self, skip_read: bool = False) -> None:
-        if self._data is None:
-            self._data = xr.Dataset()
-            if self.root.is_reading_mode() and not skip_read:
-                self.read()
+        # if self._data is None:
+        self._data = xr.Dataset()
+        if self.root.is_reading_mode() and not skip_read:
+            self.read()
 
     @property
     def nr_points(self) -> int:
         """Number of boundary points."""
-        if self._data is None:
+        # if self._data is None:
+        #     return 0
+        # if self.data is an empty xr.Dataset, return 0
+        if len(self.data.dims) == 0:
             return 0
         if self.forcing == "timeseries":
-            return int(self._data.sizes.get("index", 0))
+            return int(self.data.sizes.get("index", 0))
         else:
-            return int(self._data.sizes.get("stations", 0))
+            return int(self.data.sizes.get("stations", 0))
 
     @property
     def gdf(self) -> gpd.GeoDataFrame:
@@ -116,11 +119,11 @@ class HurrywaveBoundaryConditions(ModelComponent):
         if self.nr_points == 0:
             return gpd.GeoDataFrame()
         if self.forcing == "timeseries":
-            return self._data.vector.to_gdf().reset_index(drop=True)
+            return self.data.vector.to_gdf().reset_index(drop=True)
         else:
-            xs = self._data["station_x"].values
-            ys = self._data["station_y"].values
-            names = list(self._data["stations"].values)
+            xs = self.data["station_x"].values
+            ys = self.data["station_y"].values
+            names = list(self.data["stations"].values)
             points = [shapely.geometry.Point(x, y) for x, y in zip(xs, ys)]
             return gpd.GeoDataFrame(
                 {"name": names}, geometry=points, crs=self.model.crs
@@ -137,6 +140,10 @@ class HurrywaveBoundaryConditions(ModelComponent):
         if bspfile is not None:
             # Boundary spectra take precedence if bspfile is set, even if bhsfile etc. are also set
             self.forcing = "spectra"
+            # For CoSMoS, we also need to read the boundary points from the .bnd file,
+            # even though locations are in the .bsp file
+            print("reading bnd file")
+            self._read_boundary_points()
             self._read_boundary_spectra()
         else:
             self.forcing = "timeseries"

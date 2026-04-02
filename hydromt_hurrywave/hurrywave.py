@@ -100,6 +100,7 @@ class HurrywaveModel(Model):
         self,
         root: str = None,
         mode: str = "w",
+        write_gis: bool = True,
         data_libs: Union[List[str], str] = None,
         **catalog_keys,
     ):
