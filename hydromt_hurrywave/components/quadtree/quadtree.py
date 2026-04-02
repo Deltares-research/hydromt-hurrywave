@@ -249,10 +249,13 @@ class HurrywaveQuadtreeGrid(MeshComponent):
                 x0, y0, dx, dy, mmax, nmax, rotation=rotation, crs=crs, make_ugrid=True
             )
             res = dx
-            levels = set(refinement_polygons["refinement_level"].unique())
+            if refinement_polygons is not None:
+                nlev = max(refinement_polygons["refinement_level"].unique())
+            else:
+                nlev = 1
             if crs.is_geographic:
                 res = res * 111111.0
-            for lev in range(max(levels)):
+            for lev in range(nlev):
                 res_level = res / (2**lev)
                 elevation_list_per_level.append(
                     self.model._parse_datasets_elevation(elevation_list, res=res_level)

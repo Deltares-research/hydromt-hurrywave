@@ -172,6 +172,58 @@ class HurrywaveModel(Model):
         return self.quadtree_mask
 
     # ------------------------------------------------------------------
+    # Dataset parsing
+    # ------------------------------------------------------------------
+
+    def _parse_datasets_elevation(self, elevation_list, res=None):
+        """Resolve elevation dataset entries to DataArrays.
+
+        Parameters
+        ----------
+        elevation_list : list of dict
+            Each entry should have an ``"elevation"`` or ``"da"`` key.
+        res : float, optional
+            Target resolution in model CRS units.
+
+        Returns
+        -------
+        list of dict
+            Resolved datasets with ``"da"`` DataArrays.
+        """
+        parse_keys = ["elevation", "da"]
+        copy_keys = ["zmin", "zmax", "merge_method"]
+
+        datasets_out = []
+        for dataset in elevation_list:
+            dd = {}
+            if "elevation" in dataset or "da" in dataset:
+                try:
+                    zoom = (res, "meter") if res is not None else None
+                    da_elv = self.data_catalog.get_rasterdataset(
+                        dataset.get("elevation", dataset.get("da")),
+                        bbox=self.bbox,
+                        buffer=10,
+                        zoom=zoom,
+                    )
+                    da_elv.name = "elevation"
+                except Exception:
+                    data_name = dataset.get("elevation", dataset.get("da"))
+                    logger.warning(f"No data in domain for {data_name}, skipped.")
+                    continue
+                dd.update({"da": da_elv})
+            else:
+                raise ValueError(
+                    "No 'elevation' dataset provided in elevation_list."
+                )
+
+            for key, value in dataset.items():
+                if key in copy_keys and key not in dd:
+                    dd[key] = value
+            datasets_out.append(dd)
+
+        return datasets_out
+
+    # ------------------------------------------------------------------
     # I/O
     # ------------------------------------------------------------------
 

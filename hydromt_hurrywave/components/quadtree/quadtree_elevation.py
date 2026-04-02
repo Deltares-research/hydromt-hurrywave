@@ -366,6 +366,9 @@ class HurrywaveQuadtreeElevation(MeshComponent):
                     bm0 = m0 + ii * nrcb
                     bm1 = min(bm0 + nrcb - 1, m1) + 1
 
+                    if bn1 <= bn0 or bm1 <= bm0:
+                        continue
+
                     # Sub-grid pixel coordinates in the rotated local frame
                     x00 = 0.5 * dxp + bm0 * refi * dxp
                     x01 = x00 + (bm1 - bm0) * refi * dxp

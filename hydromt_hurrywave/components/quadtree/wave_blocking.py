@@ -263,6 +263,9 @@ class HurrywaveWaveBlocking(ModelComponent):
                     bm0 = m0 + ii * nrcb
                     bm1 = min(bm0 + nrcb - 1, m1) + 1
 
+                    if bn1 <= bn0 or bm1 <= bm0:
+                        continue
+
                     # Subgrid pixel coordinates in the grid's local (rotated) frame
                     x00 = 0.5 * dxp + bm0 * refi * dxp
                     x01 = x00 + (bm1 - bm0) * refi * dxp
