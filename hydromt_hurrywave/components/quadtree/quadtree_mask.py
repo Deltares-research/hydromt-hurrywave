@@ -431,10 +431,10 @@ class HurrywaveQuadtreeMask(ModelComponent):
         file_name,
         xlim=None,
         ylim=None,
-        active_color="yellow",
-        boundary_color="red",
+        colors=None,
         px=2,
         width=800,
+        **kwargs,
     ):
         """Create a map overlay image of the mask using datashader.
 
@@ -444,10 +444,10 @@ class HurrywaveQuadtreeMask(ModelComponent):
             Output image file name.
         xlim, ylim : list, optional
             Geographic (lon/lat) extent of the image.
-        active_color : str, optional
-            Colour for active cells (mask=1), by default ``'yellow'``.
-        boundary_color : str, optional
-            Colour for open-boundary cells (mask=2), by default ``'red'``.
+        colors : dict, optional
+            Mapping of integer mask values to colour strings, e.g.
+            ``{1: "yellow", 2: "red"}``.  By default
+            ``{1: "yellow", 2: "red"}``.
         px : int, optional
             Marker radius in pixels, by default 2.
         width : int, optional
@@ -458,6 +458,9 @@ class HurrywaveQuadtreeMask(ModelComponent):
         bool
             True if the image was created successfully, False otherwise.
         """
+        if colors is None:
+            colors = {1: "yellow", 2: "red"}
+
         if not HAS_DATASHADER:
             logger.warning("datashader is not installed.")
             return False
@@ -486,17 +489,25 @@ class HurrywaveQuadtreeMask(ModelComponent):
                 x_range=xlim, y_range=ylim, plot_height=height, plot_width=width
             )
 
-            dfact = self.datashader_dataframe[self.datashader_dataframe["mask"] == 1]
-            dfbnd = self.datashader_dataframe[self.datashader_dataframe["mask"] == 2]
-            img_a = tf.shade(
-                tf.spread(cvs.points(dfact, "x", "y", ds.any()), px=px),
-                cmap=active_color,
-            )
-            img_b = tf.shade(
-                tf.spread(cvs.points(dfbnd, "x", "y", ds.any()), px=px),
-                cmap=boundary_color,
-            )
-            img = tf.stack(img_a, img_b)
+            images = []
+            for mask_val, color in colors.items():
+                df_sub = self.datashader_dataframe[
+                    self.datashader_dataframe["mask"] == mask_val
+                ]
+                if len(df_sub) > 0:
+                    images.append(
+                        tf.shade(
+                            tf.spread(cvs.points(df_sub, "x", "y", ds.any()), px=px),
+                            cmap=color,
+                        )
+                    )
+
+            if not images:
+                return False
+
+            img = images[0]
+            for im in images[1:]:
+                img = tf.stack(img, im)
 
             out_path = os.path.dirname(file_name)
             if not out_path:
