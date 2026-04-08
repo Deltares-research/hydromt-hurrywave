@@ -90,7 +90,7 @@ class HurrywaveConfig(ModelComponent):
                 )
             self._data = self.data.__class__.model_validate(current_data)
 
-    def write(self, filename: str = "hurrywave.inp") -> None:
+    def write(self, filename: str = "hurrywave.inp", write_description: bool = False) -> None:
         """Write HurrywaveConfigVariables to hurrywave.inp.
 
         Each field's ``json_schema_extra`` controls whether it is written:
@@ -144,7 +144,12 @@ class HurrywaveConfig(ModelComponent):
                     # Extra fields (not declared) are always written
 
                 # Serialise and write
-                value = _convert_to_number(value)
+                # Preserve float type if the field is declared as float
+                if field_info is not None and field_info.annotation is float:
+                    value = float(value) if not isinstance(value, float) else value
+                else:
+                    value = _convert_to_number(value)
+
                 if isinstance(value, (int, float)):
                     string = f"{key.ljust(20)} = {value}"
                 elif isinstance(value, list):
@@ -153,6 +158,11 @@ class HurrywaveConfig(ModelComponent):
                     string = f"{key.ljust(20)} = {value.strftime('%Y%m%d %H%M%S')}"
                 else:
                     string = f"{key.ljust(20)} = {value}"
+
+                # Add description as comment
+                if write_description and field_info and field_info.description:
+                    string = f"{string.ljust(50)} # {field_info.description}"
+
                 fid.write(string + "\n")
 
     def get(self, key: str, fallback: Any = None, abs_path: bool = False) -> Any:
