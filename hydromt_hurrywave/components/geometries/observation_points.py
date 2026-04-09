@@ -101,9 +101,9 @@ class _ObservationPointsBase(ModelComponent):
                 x, y = row.geometry.x, row.geometry.y
                 name = row.get("name", "")
                 if self.model.crs.is_geographic:
-                    fid.write(f"{x:12.6f}  {y:12.6f}  {name}\n")
+                    fid.write(f'{x:12.6f}  {y:12.6f}  "{name}"\n')
                 else:
-                    fid.write(f"{x:12.1f}  {y:12.1f}  {name}\n")
+                    fid.write(f'{x:12.1f}  {y:12.1f}  "{name}"\n')
 
     @hydromt_step
     def add_point(self, x: float, y: float, name: str = None) -> None:

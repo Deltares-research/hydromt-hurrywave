@@ -389,7 +389,7 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             agg = cvs.line(
                 self.datashader_dataframe, x=["x1", "x2"], y=["y1", "y2"], axis=1
             )
-            img = tf.shade(agg)
+            img = tf.shade(agg, cmap=color)
             path_dir = os.path.dirname(file_name) or os.getcwd()
             name = os.path.splitext(os.path.basename(file_name))[0]
             export_image(img, name, export_path=path_dir)
