@@ -271,3 +271,77 @@ class HurrywaveModel(Model):
         tstart = pd.Timestamp(self.config.get("tstart"))
         tstop = pd.Timestamp(self.config.get("tstop"))
         return tstart, tstop
+    
+    def _parse_datasets_elevation(self, elevation_list, res):
+        """Parse filenames or paths of Datasets in list of dictionaries elevation_list
+        into xr.DataArray and gdf.GeoDataFrames:
+
+        * "elevation" is parsed into da (xr.DataArray)
+        * "offset" is parsed into da_offset (xr.DataArray)
+        * "mask" is parsed into gdf (gpd.GeoDataFrame)
+
+        Parameters
+        ----------
+        elevation_list : List[dict]
+            List of dictionaries with topography and bathymetry data, each containing a dataset name or
+            Path (dep) and optional merge arguments.
+        res : float
+            Resolution of the model grid in meters. Used to obtain the correct zoom
+            level of the depth datasets.
+        """
+        parse_keys = ["elevation", "offset", "mask", "da"]
+        copy_keys = ["zmin", "zmax", "reproj_method", "merge_method", "offset"]
+
+        datasets_out = []
+        for dataset in elevation_list:
+            dd = {}
+            # read in depth datasets; replace dep (source name; filename or xr.DataArray)
+            if "elevation" in dataset or "da" in dataset:
+                try:
+                    da_elv = self.data_catalog.get_rasterdataset(
+                        dataset.get("elevation", dataset.get("da")),
+                        bbox=self.bbox,
+                        buffer=10,
+                        variables=["elevtn"],  # NOTE this is still hydromt convention
+                        zoom=(res, "meter"),
+                    )
+                    # rename elevtn to elevation if present
+                    da_elv.name = "elevation"
+                # TODO remove ValueError after fix in hydromt core
+                except (IndexError, ValueError):
+                    data_name = dataset.get("elevation")
+                    logger.warning(f"No data in domain for {data_name}, skipped.")
+                    continue
+                dd.update({"da": da_elv})
+            else:
+                raise ValueError(
+                    "No 'elevation' (topobathy) dataset provided in elevation_list."
+                )
+
+            # read offset filenames
+            # NOTE offsets can be xr.DataArrays and floats
+            if "offset" in dataset and not isinstance(dataset["offset"], (float, int)):
+                da_offset = self.data_catalog.get_rasterdataset(
+                    dataset.get("offset"),
+                    bbox=self.bbox,
+                    buffer=10,
+                )
+                dd.update({"offset": da_offset})
+
+            # read geodataframes describing valid areas
+            if "mask" in dataset:
+                gdf_valid = self.data_catalog.get_geodataframe(
+                    dataset.get("mask"),
+                    bbox=self.bbox,
+                )
+                dd.update({"gdf_valid": gdf_valid})
+
+            # copy remaining keys
+            for key, value in dataset.items():
+                if key in copy_keys and key not in dd:
+                    dd.update({key: value})
+                elif key not in copy_keys + parse_keys:
+                    logger.warning(f"Unknown key {key} in elevation_list. Ignoring.")
+            datasets_out.append(dd)
+
+        return datasets_out

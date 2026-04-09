@@ -17,7 +17,7 @@ from hydromt import hydromt_step
 from hydromt.model.components import MeshComponent
 from hydromt.model.processes.grid import create_grid_from_region
 
-from hydromt_sfincs.utils import make_regular_grid
+from hydromt_hurrywave.utils import make_regular_grid
 from .quadtree_builder import build_quadtree_xugrid, cut_inactive_cells
 
 # optional dependency

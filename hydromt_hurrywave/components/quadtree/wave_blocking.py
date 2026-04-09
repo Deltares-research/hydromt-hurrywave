@@ -17,8 +17,8 @@ import xarray as xr
 from hydromt import hydromt_step
 from hydromt.model.components import ModelComponent
 
-from hydromt_sfincs.utils import make_regular_grid
-from hydromt_sfincs.workflows.merge import merge_multi_dataarrays
+from hydromt_hurrywave.utils import make_regular_grid
+from hydromt_hurrywave.workflows.merge import merge_multi_dataarrays
 
 if TYPE_CHECKING:
     from hydromt_hurrywave import HurrywaveModel
@@ -350,7 +350,7 @@ class HurrywaveWaveBlocking(ModelComponent):
                         nn = (n[idx] - bn0) * refi
                         mm = (m[idx] - bm0) * refi
                         zgc = zg[nn: nn + refi, mm: mm + refi]
-
+                        # BUG, somehow zbc can be empty, causing np.nanmax to raise an error.  Skip such cells.
                         if np.nanmax(zgc) < threshold_level:
                             # No obstacle above threshold → no blocking
                             continue

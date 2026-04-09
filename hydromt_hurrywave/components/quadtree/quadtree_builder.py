@@ -10,8 +10,8 @@ from scipy.interpolate import RegularGridInterpolator
 from shapely.geometry import Polygon
 from shapely.prepared import prep
 
-from hydromt_sfincs.workflows.merge import merge_multi_dataarrays
-from hydromt_sfincs.utils import make_regular_grid
+from hydromt_hurrywave.workflows.merge import merge_multi_dataarrays
+from hydromt_hurrywave.utils import make_regular_grid
 
 np.warnings = warnings
 
