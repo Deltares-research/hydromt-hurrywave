@@ -579,6 +579,7 @@ class HurrywaveQuadtreeElevation(MeshComponent):
         cmin=None,
         cmax=None,
         width=800,
+        **kwargs,
     ):
         """Create a map overlay image of the bathymetry using datashader.
 
