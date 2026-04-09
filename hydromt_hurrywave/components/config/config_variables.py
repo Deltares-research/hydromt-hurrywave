@@ -63,7 +63,7 @@ class HurrywaveConfigVariables(BaseSettings):
     t1out: float = Field(-999.0, description="Output stop time offset from tref (seconds; -999 = use tstop)")
 
     # ---- Output intervals ----
-    dtmapout: float = Field(0.0, ge=0, description="Map output interval (seconds); keyword 'dtout' also accepted")
+    dtmapout: float = Field(3600.0, ge=0, description="Map output interval (seconds); keyword 'dtout' also accepted")
     dthisout: float = Field(600.0, ge=0, description="Time-series (his) output interval (seconds)")
     dtsp2out: float = Field(3600.0, ge=0, description="Spectral output interval (seconds)")
     dtwnd: float = Field(1800.0, ge=0, description="Wind forcing update interval (seconds)")
