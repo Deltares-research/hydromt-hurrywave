@@ -417,20 +417,32 @@ class HurrywaveBoundaryConditions(ModelComponent):
             for var, val in zip(_TS_VARNAMES, [hs, tp, wd, ds]):
                 self._data[var][:, 0] = val
         else:
-            # Append one column to each variable
+            # Rebuild dataset with the additional point
+            existing_gdf = self.gdf
+            combined_gdf = gpd.GeoDataFrame(
+                pd.concat([existing_gdf, gdf], ignore_index=True),
+                crs=self.model.crs,
+            )
             tstart, tstop = self.model.get_model_time()
             time = pd.date_range(tstart, tstop, periods=2)
-            new_idx = self.nr_points
+
+            # Preserve existing values
+            old_n = self.nr_points
+            n_time = 2
+            old_values = {}
+            for var in _TS_VARNAMES:
+                if var in self._data:
+                    da = self._data[var]
+                    # Ensure dimension order is (time, index)
+                    if "time" in da.dims and "index" in da.dims:
+                        da = da.transpose("time", "index")
+                    old_values[var] = da.values.copy()
+
+            self._data = self._make_empty_timeseries_dataset(combined_gdf, time)
             for var, val in zip(_TS_VARNAMES, [hs, tp, wd, ds]):
-                new_da = xr.DataArray(
-                    np.full((2, 1), val),
-                    dims=("time", "index"),
-                    coords={"time": time, "index": [new_idx]},
-                    name=var,
-                )
-                self._data[var] = xr.concat(
-                    [self._data[var], new_da], dim="index"
-                ).assign_coords(index=np.arange(new_idx + 1))
+                if var in old_values:
+                    self._data[var].values[:, :old_n] = old_values[var]
+                self._data[var].values[:, old_n] = val
 
     def delete(self, index: Union[int, List[int]]) -> None:
         """Delete one or more boundary points by index.
