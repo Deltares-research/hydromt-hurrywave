@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 import geopandas as gpd
 import numpy as np
-import pandas as pd
 import shapely
 import xarray as xr
 import xugrid as xu
@@ -16,8 +15,7 @@ from pyproj import CRS
 
 from hydromt_hurrywave.utils import make_regular_grid
 from hydromt_hurrywave.workflows.map_overlay import (
-    make_edge_dataframe,
-    make_map_overlay,
+    MeshOverlay,
 )
 from hydromt_hurrywave.workflows.tiling import make_index_tiles
 
@@ -41,7 +39,7 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         self._filename: str = "hurrywave.nc"
         self._data: xu.UgridDataset = None
         self.version = 0
-        self.datashader_dataframe = pd.DataFrame()
+        self._overlay = MeshOverlay()
 
         super().__init__(
             model=model,
@@ -230,8 +228,8 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         bathymetry_database : object, optional
             cht_bathymetry database object.
         """
-        self.datashader_dataframe = pd.DataFrame()
-        self.model.quadtree_mask.clear_datashader_dataframe()
+        self._overlay.invalidate()
+        self.model.quadtree_mask.clear_overlay()
 
         self.model.grid_type = "quadtree"
         crs = CRS.from_epsg(epsg)
@@ -343,9 +341,13 @@ class HurrywaveQuadtreeGrid(MeshComponent):
 
     def cut_inactive_cells(self):
         """Remove inactive cells (mask == 0) from the grid dataset."""
-        self.datashader_dataframe = pd.DataFrame()
-        self.model.quadtree_mask.clear_datashader_dataframe()
+        self._overlay.invalidate()
+        self.model.quadtree_mask.clear_overlay()
         self._data = cut_inactive_cells(self.data)
+
+    def clear_overlay(self) -> None:
+        """Invalidate the cached edge-overlay dataframe."""
+        self._overlay.invalidate()
 
     def snap_to_grid(self, polyline):
         """Snap a polyline GeoDataFrame to the nearest grid edges."""
@@ -371,44 +373,17 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         color: str = "black",
         width: int = 800,
     ) -> bool:
-        """Render a PNG map overlay of the grid edges using datashader.
+        """Render a PNG map overlay of the grid edges.
 
-        Thin wrapper around
-        :py:func:`hydromt_hurrywave.workflows.map_overlay.make_map_overlay`.
-        The webmercator edge DataFrame is built lazily on first call and
-        cached on ``self.datashader_dataframe``; it is invalidated
-        whenever the grid is re-created or cells are cut.
-
-        Parameters
-        ----------
-        file_name : str or Path
-            Output image path. Datashader appends ``.png``.
-        xlim : list of float, optional
-            Longitude limits ``[xmin, xmax]`` in EPSG:4326.
-        ylim : list of float, optional
-            Latitude limits ``[ymin, ymax]`` in EPSG:4326.
-        color : str, optional
-            Line colour, by default ``"black"``.
-        width : int, optional
-            Output image width in pixels; height is derived from the
-            aspect ratio of ``xlim`` / ``ylim``. Defaults to ``800``.
-
-        Returns
-        -------
-        bool
-            ``True`` if the overlay was written, ``False`` if the grid is
-            empty, datashader is unavailable, or rendering raised an
-            exception.
+        One-line wrapper around
+        :py:class:`hydromt_hurrywave.workflows.map_overlay.MeshOverlay`.
         """
         if self.data is None:
             return False
-        if self.datashader_dataframe.empty:
-            self.datashader_dataframe = make_edge_dataframe(
-                self.data.grid, self.model.crs
-            )
-        return make_map_overlay(
-            self.datashader_dataframe,
-            file_name,
+        return self._overlay.render(
+            ugrid=self.data.grid,
+            source_crs=self.model.crs,
+            file_name=file_name,
             xlim=xlim,
             ylim=ylim,
             color=color,
