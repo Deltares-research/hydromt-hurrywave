@@ -339,6 +339,7 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             elevation_list=elevation_list,
         )
 
+    @hydromt_step
     def cut_inactive_cells(self):
         """Remove inactive cells (mask == 0) from the grid dataset."""
         self._overlay.invalidate()

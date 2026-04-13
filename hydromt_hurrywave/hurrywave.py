@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Union
+from pathlib import Path
+from typing import List, Optional, Union
 
 import geopandas as gpd
 from pyproj import CRS
@@ -11,6 +12,7 @@ from pyproj import CRS
 from hydromt.model import Model
 
 from hydromt_hurrywave.components.config import HurrywaveConfig
+from hydromt_hurrywave.components.output import HurrywaveOutput
 from hydromt_hurrywave.components.quadtree import (
     HurrywaveQuadtreeGrid,
     HurrywaveQuadtreeElevation,
@@ -87,11 +89,16 @@ class HurrywaveModel(Model):
         "wind": HurrywaveWind,
     }
 
+    _OUTPUT_COMPONENTS = {
+        "output": HurrywaveOutput,
+    }
+
     _ALL_COMPONENTS = {
         **_CONFIG_COMPONENTS,
         **_QUADTREE_COMPONENTS,
         **_GEOMETRY_COMPONENTS,
         **_FORCING_COMPONENTS,
+        **_OUTPUT_COMPONENTS,
     }
 
     _QUADTREE_GRID_NAMES = set(_QUADTREE_COMPONENTS.keys())
@@ -102,6 +109,7 @@ class HurrywaveModel(Model):
         mode: str = "w",
         write_gis: bool = True,
         data_libs: Union[List[str], str] = None,
+        exe_path: Optional[str] = None,
         **catalog_keys,
     ):
         """Initialise a HurrywaveModel.
@@ -114,11 +122,15 @@ class HurrywaveModel(Model):
             Open in write, append, or read mode.  Default ``'w'``.
         data_libs : list of str or str, optional
             HydroMT data catalog YAML files.
+        exe_path : str, optional
+            Folder containing the ``hurrywave.exe`` binary; used by
+            :meth:`write_batch_file`.
         **catalog_keys
             Additional keyword arguments forwarded to the DataCatalog.
         """
         # HurryWave only supports quadtree grids
         self.grid_type = "quadtree"
+        self.exe_path = exe_path
 
         super().__init__(
             root=root,
@@ -129,6 +141,57 @@ class HurrywaveModel(Model):
 
         for name, cls in self._ALL_COMPONENTS.items():
             self.add_component(name, cls(self))
+
+    def write_batch_file(self, filename: Optional[str] = None) -> Path:
+        """Write a platform-appropriate launcher script for HurryWave.
+
+        On Windows this emits ``run.bat`` (``set HDF5_USE_FILE_LOCKING``);
+        on Linux / macOS it emits ``run.sh`` (``#!/bin/bash`` + ``export``
+        + executable bit). The HurryWave binary itself is expected to be
+        ``hurrywave.exe`` on Windows and ``hurrywave`` elsewhere.
+
+        Parameters
+        ----------
+        filename : str, optional
+            Override the output file name. Defaults to ``run.bat`` on
+            Windows and ``run.sh`` on other platforms.
+
+        Returns
+        -------
+        Path
+            The path of the written launcher script.
+        """
+        import os
+
+        if not self.exe_path:
+            raise ValueError(
+                "exe_path not set on HurrywaveModel; cannot write launcher script."
+            )
+        is_windows = os.name == "nt"
+        if filename is None:
+            filename = "run.bat" if is_windows else "run.sh"
+        script_path = Path(self.root.path) / filename
+        if is_windows:
+            exe = Path(self.exe_path) / "hurrywave.exe"
+            script_path.write_text(
+                "set HDF5_USE_FILE_LOCKING=FALSE\n"
+                f"{exe}\n",
+                encoding="ascii",
+            )
+        else:
+            exe = Path(self.exe_path) / "hurrywave"
+            script_path.write_text(
+                "#!/bin/bash\n"
+                "export HDF5_USE_FILE_LOCKING=FALSE\n"
+                f'"{exe}"\n',
+                encoding="ascii",
+            )
+            try:
+                st = script_path.stat().st_mode
+                script_path.chmod(st | 0o111)
+            except OSError:
+                pass
+        return script_path
 
     # ------------------------------------------------------------------
     # Properties

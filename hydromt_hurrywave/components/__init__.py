@@ -1,6 +1,7 @@
 from .config import HurrywaveConfig, HurrywaveConfigVariables
 from .forcing import HurrywaveBoundaryConditions, HurrywaveWind
 from .geometries import HurrywaveObservationPoints, HurrywaveObservationPointsSpectra
+from .output import HurrywaveOutput
 from .quadtree import (
     HurrywaveQuadtreeElevation,
     HurrywaveQuadtreeGrid,
@@ -12,6 +13,7 @@ __all__ = [
     "HurrywaveConfig",
     "HurrywaveConfigVariables",
     "HurrywaveBoundaryConditions",
+    "HurrywaveOutput",
     "HurrywaveWind",
     "HurrywaveObservationPoints",
     "HurrywaveObservationPointsSpectra",
