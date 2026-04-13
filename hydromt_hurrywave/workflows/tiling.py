@@ -342,6 +342,29 @@ def _precompute_quadtree_lookup(quadtree_grid) -> dict:
     )
 
 
+def _resolve_elevation_list_from_catalog(
+    data_catalog, res: Optional[float] = None, bbox=None
+) -> List[dict]:
+    """Build an elevation_list by resolving every source in a data catalog.
+
+    Used as a fallback when no explicit ``elevation_list`` is supplied to
+    the tiling workflows. Assumes all sources in ``data_catalog`` are
+    raster elevation datasets (true in DelftDashboard, where the model's
+    catalog is populated only with topobathy sources).
+    """
+    resolved: List[dict] = []
+    for name in list(data_catalog.sources):
+        try:
+            zoom = (res, "meter") if res is not None else None
+            da = data_catalog.get_rasterdataset(name, bbox=bbox, buffer=10, zoom=zoom)
+            da.name = "elevation"
+        except Exception:
+            logger.warning(f"No data in domain for {name}, skipped.")
+            continue
+        resolved.append({"da": da})
+    return resolved
+
+
 def make_index_tiles(
     quadtree_grid,
     root: Union[str, Path],
@@ -379,7 +402,9 @@ def make_index_tiles(
     elevation_list : list of dict, optional
         Topobathy datasets (same format as
         :py:func:`hydromt_sfincs.workflows.tiling.create_topobathy_tiles`).
-        Required when ``z_range`` is set.
+        Required when ``z_range`` is set. If ``None`` and ``z_range`` is
+        set, falls back to ``quadtree_grid.model.data_catalog`` — every
+        source in the catalog is treated as an elevation dataset.
     z_range : list of float, optional
         ``[zmin, zmax]`` pixel-elevation window. Pixels outside this
         window are masked out. Requires ``elevation_list``.
@@ -398,11 +423,27 @@ def make_index_tiles(
         well for pure-index tiling; threads also help overlap file I/O
         when many small tiles are written.
     """
-    if z_range is not None and elevation_list is None:
-        raise ValueError("`z_range` requires `elevation_list` to be provided.")
-
     if region is None:
         region = quadtree_grid.exterior
+
+    # If no elevation_list is given but a z_range is active, fall back to the
+    # model's data catalog (if populated). Explicit elevation_list always wins.
+    if elevation_list is None and z_range is not None:
+        data_catalog = getattr(quadtree_grid.model, "data_catalog", None)
+        if data_catalog is not None and len(list(data_catalog.sources)) > 0:
+            if isinstance(zoom_range, int):
+                zr_max = zoom_range
+            else:
+                zr_max = zoom_range[1]
+            res = 40075016.686 / 256 / 2**zr_max
+            elevation_list = _resolve_elevation_list_from_catalog(
+                data_catalog, res=res, bbox=quadtree_grid.model.bbox
+            )
+
+    if z_range is not None and (elevation_list is None or len(elevation_list) == 0):
+        raise ValueError(
+            "`z_range` requires `elevation_list` or a populated model data catalog."
+        )
 
     index_path = os.path.join(root, "indices")
     npix = 256
@@ -476,6 +517,10 @@ def make_index_tiles(
                 dims=["y", "x"],
             )
             da_dep.raster.set_crs(3857)
+            # Tell rioxarray which dims are spatial so it can derive the
+            # transform from the coordinate arrays (avoids
+            # NotGeoreferencedWarning during reprojection).
+            da_dep.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
             da_dep = merge_multi_dataarrays(
                 da_list=elevation_list,
                 da_like=da_dep,

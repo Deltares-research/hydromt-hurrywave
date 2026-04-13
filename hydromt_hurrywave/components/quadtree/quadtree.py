@@ -531,14 +531,34 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             Number of worker threads used to render tiles concurrently.
             Defaults to ``os.cpu_count()``. Pass ``1`` to disable
             parallelism.
+
+        Notes
+        -----
+        ``elevation_list`` may be passed in the DDB "name" format (entries
+        with just ``"name"``, ``"zmin"``, ``"zmax"`` keys). In that case
+        the DataArrays are fetched from the model's data catalog
+        automatically using the resolution of the highest zoom level.
         """
+        if isinstance(zoom_range, int):
+            zr = [0, zoom_range]
+        else:
+            zr = zoom_range
+
+        # Convert DDB-format elevation_list (name-only) to hydromt format (with "da")
+        if elevation_list is not None and len(elevation_list) > 0:
+            if "da" not in elevation_list[0]:
+                res = 40075016.686 / 256 / 2 ** zr[1]
+                elevation_list = self.model._parse_datasets_elevation(
+                    elevation_list, res=res
+                )
+
         make_index_tiles(
             quadtree_grid=self,
             root=root,
             region=region,
             elevation_list=elevation_list,
             z_range=z_range,
-            zoom_range=zoom_range,
+            zoom_range=zr,
             fmt=fmt,
             write_html_viewer=write_html_viewer,
             max_workers=max_workers,
