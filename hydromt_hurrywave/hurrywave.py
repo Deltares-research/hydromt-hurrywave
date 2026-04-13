@@ -259,11 +259,19 @@ class HurrywaveModel(Model):
             except Exception as exc:
                 logger.warning(f"Could not read component '{name}': {exc}")
 
-    def write(self) -> None:
+    def write(self, write_batch_file: bool = False) -> None:
         """Write the full HurryWave model to *root*.
 
-        Individual component ``write()`` calls may register file names in the
-        config, so ``config`` is always written last.
+        Individual component ``write()`` calls may register file names in
+        the config, so ``config`` is always written last.
+
+        Parameters
+        ----------
+        write_batch_file : bool, optional
+            If True, also write a platform-appropriate launcher script
+            (``run.bat`` on Windows, ``run.sh`` elsewhere) via
+            :meth:`write_batch_file`. Requires ``self.exe_path`` to be
+            set. Default ``False``.
         """
         for name, comp in self.components.items():
             if name == "config":
@@ -274,6 +282,10 @@ class HurrywaveModel(Model):
                 logger.warning(f"Could not write component '{name}': {exc}")
 
         self.config.write()
+
+        # Optional launcher script (opt-in; DDB passes True explicitly).
+        if write_batch_file:
+            self.write_batch_file()
 
     # ------------------------------------------------------------------
     # Helpers
