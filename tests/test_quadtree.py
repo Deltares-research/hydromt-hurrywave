@@ -32,6 +32,40 @@ class TestQuadtreeGrid:
         assert len(yc) == n
 
 
+class TestQuadtreeCreateIndexTiles:
+    """Index-tile generation for the quadtree grid."""
+
+    def test_create_index_tiles_png_and_html(self, model_with_mask, tmp_path):
+        # Small grid (10 x 10 @ 1 km) — need enough zoom to resolve pixels.
+        zoom_range = [12, 13]
+        root = tmp_path / "tiles_png"
+        model_with_mask.quadtree_grid.create_index_tiles(
+            root=root, zoom_range=zoom_range
+        )
+        png_files = list((root / "indices").rglob("*.png"))
+        assert len(png_files) > 0
+        # <indices>/<zoom>/<x>/<y>.png
+        zoom_levels = {int(p.parts[-3]) for p in png_files}
+        assert zoom_levels.issubset(set(range(zoom_range[0], zoom_range[1] + 1)))
+        # HTML viewer is written by default alongside PNG tiles
+        html_file = root / "indices" / "index.html"
+        assert html_file.is_file()
+        assert "{z}/{x}/{y}.png" in html_file.read_text()
+
+    def test_create_index_tiles_bin(self, model_with_mask, tmp_path):
+        zoom_range = [12, 13]
+        root = tmp_path / "tiles_bin"
+        model_with_mask.quadtree_grid.create_index_tiles(
+            root=root, zoom_range=zoom_range, fmt="bin"
+        )
+        dat_files = list((root / "indices").rglob("*.dat"))
+        assert len(dat_files) > 0
+        # Each .dat tile should be 256*256 int32 = 262144 bytes
+        assert dat_files[0].stat().st_size == 256 * 256 * 4
+        # No HTML viewer for bin format
+        assert not (root / "indices" / "index.html").exists()
+
+
 class TestQuadtreeGridIO:
     """Grid read/write round-trip."""
 
@@ -49,7 +83,10 @@ class TestQuadtreeGridIO:
         mod2.config.read()
         mod2.quadtree_grid.read()
 
-        assert mod2.quadtree_grid.data.sizes["mesh2d_nFaces"] == mod.quadtree_grid.data.sizes["mesh2d_nFaces"]
+        assert (
+            mod2.quadtree_grid.data.sizes["mesh2d_nFaces"]
+            == mod.quadtree_grid.data.sizes["mesh2d_nFaces"]
+        )
         assert mod2.quadtree_grid.crs == mod.quadtree_grid.crs
 
 

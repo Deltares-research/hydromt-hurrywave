@@ -7,17 +7,17 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from pyproj import CRS, Transformer
 import shapely
-
 import xarray as xr
 import xugrid as xu
-
 from hydromt import hydromt_step
 from hydromt.model.components import MeshComponent
 from hydromt.model.processes.grid import create_grid_from_region
+from pyproj import CRS, Transformer
 
 from hydromt_hurrywave.utils import make_regular_grid
+from hydromt_hurrywave.workflows.tiling import int2png, tile_window, write_html
+
 from .quadtree_builder import build_quadtree_xugrid, cut_inactive_cells
 
 # optional dependency
@@ -263,7 +263,14 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             elevation_list = elevation_list_per_level
 
         self._data = build_quadtree_xugrid(
-            x0, y0, nmax, mmax, dx, dy, rotation, crs,
+            x0,
+            y0,
+            nmax,
+            mmax,
+            dx,
+            dy,
+            rotation,
+            crs,
             refinement_polygons=refinement_polygons,
             elevation_list=elevation_list,
             bathymetry_database=bathymetry_database,
@@ -329,8 +336,14 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         epsg = ds.raster.crs.to_epsg()
 
         self.create(
-            x0=x0, y0=y0, nmax=nmax, mmax=mmax,
-            dx=dx, dy=dy, rotation=rotation, epsg=epsg,
+            x0=x0,
+            y0=y0,
+            nmax=nmax,
+            mmax=mmax,
+            dx=dx,
+            dy=dy,
+            rotation=rotation,
+            epsg=epsg,
             refinement_polygons=refinement_polygons,
             elevation_list=elevation_list,
         )
@@ -422,9 +435,9 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         if not hasattr(self, "ifirst"):
             ifirst = np.zeros(nr_refinement_levels, dtype=int)
             for ilev in range(nr_refinement_levels):
-                ifirst[ilev] = np.where(
-                    self.data["level"].to_numpy()[:] == ilev + 1
-                )[0][0]
+                ifirst[ilev] = np.where(self.data["level"].to_numpy()[:] == ilev + 1)[
+                    0
+                ][0]
             self.ifirst = ifirst
 
         ifirst = self.ifirst
@@ -462,14 +475,120 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             if incell[0].size > 0:
                 try:
                     cell_indices = (
-                        _binary_search(nm_lev[ilev], ind[incell[0], incell[1]])
-                        + i0
+                        _binary_search(nm_lev[ilev], ind[incell[0], incell[1]]) + i0
                     )
                     indx[incell[0], incell[1]] = cell_indices
                 except Exception as e:
                     logger.warning(f"Error in binary search: {e}")
 
         return indx
+
+    def create_index_tiles(
+        self,
+        root: Union[str, Path],
+        region: Optional[gpd.GeoDataFrame] = None,
+        zoom_range: Union[int, List[int]] = [0, 13],
+        fmt: str = "png",
+        write_html_viewer: bool = True,
+        logger: logging.Logger = logger,
+    ) -> None:
+        """Create index tiles for the HurryWave quadtree grid.
+
+        Index tiles map each pixel of a webmercator XYZ tile to the
+        corresponding HurryWave cell index, traversing all refinement
+        levels of the quadtree. They are used to quickly render model
+        output onto web maps.
+
+        Parameters
+        ----------
+        root : Union[str, Path]
+            Directory where index tiles are stored. Tiles are written to
+            ``<root>/indices/<zoom>/<x>/<y>.<ext>``.
+        region : gpd.GeoDataFrame, optional
+            GeoDataFrame defining the area for which tiles are generated.
+            If None (default), the grid exterior is used.
+        zoom_range : Union[int, List[int]], optional
+            Range of zoom levels for which tiles are created, by default
+            ``[0, 13]``. If an int is passed, tiles are created up to and
+            including that zoom level.
+        fmt : str, optional
+            Format of index tiles, either ``"png"`` (default) or ``"bin"``
+            (raw int32 binary).
+        write_html_viewer : bool, optional
+            If True (default), also write an ``index.html`` Leaflet viewer
+            alongside the tiles so they can be previewed in a browser.
+        """
+        if region is None:
+            region = self.exterior
+
+        index_path = os.path.join(root, "indices")
+        npix = 256
+
+        if fmt == "bin":
+            extension = "dat"
+        else:
+            extension = fmt
+
+        if isinstance(zoom_range, int):
+            zoom_range = [0, zoom_range]
+
+        minx, miny, maxx, maxy = region.total_bounds
+        transformer = Transformer.from_crs(region.crs.to_epsg(), 3857)
+
+        if region.crs.is_geographic:
+            minx, miny = map(
+                max, zip(transformer.transform(miny, minx), [-20037508.34] * 2)
+            )
+            maxx, maxy = map(
+                min, zip(transformer.transform(maxy, maxx), [20037508.34] * 2)
+            )
+        else:
+            minx, miny = map(
+                max, zip(transformer.transform(minx, miny), [-20037508.34] * 2)
+            )
+            maxx, maxy = map(
+                min, zip(transformer.transform(maxx, maxy), [20037508.34] * 2)
+            )
+
+        transformer_inv = Transformer.from_crs(3857, self.model.crs, always_xy=True)
+
+        for izoom in range(zoom_range[0], zoom_range[1] + 1):
+            logger.debug("Processing zoom level " + str(izoom))
+
+            zoom_path = os.path.join(index_path, str(izoom))
+
+            for transform, col, row in tile_window(izoom, minx, miny, maxx, maxy):
+                file_name = os.path.join(
+                    zoom_path, str(col), str(row) + "." + extension
+                )
+
+                x = np.arange(0, npix) + 0.5
+                y = np.arange(0, npix) + 0.5
+                x3857, y3857 = transform * (x, y)
+                x3857, y3857 = np.meshgrid(x3857, y3857)
+
+                x, y = transformer_inv.transform(x3857, y3857)
+                ind = self.get_indices_at_points(x, y)
+
+                if np.any(ind >= 0):
+                    if not os.path.exists(os.path.join(zoom_path, str(col))):
+                        os.makedirs(os.path.join(zoom_path, str(col)))
+                    if fmt == "bin":
+                        with open(file_name, "wb") as fid:
+                            fid.write(ind.astype(np.int32))
+                    elif fmt == "png":
+                        ind = ind.copy()
+                        ind[ind == -999] = 0
+                        int2png(ind, file_name)
+
+        if write_html_viewer and fmt == "png":
+            os.makedirs(index_path, exist_ok=True)
+            write_html(
+                os.path.join(index_path, "index.html"),
+                title="Index tiles",
+                legend_title="Cell indices",
+                max_native_zoom=zoom_range[1],
+            )
 
     # ------------------------------------------------------------------ internal
     def get_datashader_dataframe(self):
