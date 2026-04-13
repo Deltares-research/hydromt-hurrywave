@@ -1,11 +1,12 @@
-"""Tiling functions for fast visualization of the SFINCS model in- and output data."""
+"""Tiling functions for fast visualization of the HurryWave model in- and output data."""
 
 import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from itertools import product
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 import geopandas as gpd
 import numpy as np
@@ -16,9 +17,28 @@ from pyproj import Transformer
 
 from .merge import merge_multi_dataarrays
 
+# numba is an optional runtime accelerator for the index-tile kernel.
+try:
+    from numba import njit, prange
+
+    HAS_NUMBA = True
+except ImportError:  # pragma: no cover - exercised only on installs without numba
+    HAS_NUMBA = False
+
+    def njit(*args, **kwargs):
+        """Fallback no-op decorator used when numba is not installed."""
+        if args and callable(args[0]) and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    prange = range
+
 __all__ = [
-    "create_topobathy_tiles",
-    "downscale_floodmap_webmercator",
+    "make_index_tiles",
     "write_html",
 ]
 
@@ -185,170 +205,219 @@ def write_html(
         f.write("</script>\r\n")
 
 
-def downscale_floodmap_webmercator(
-    zsmax: Union[np.array, xr.DataArray],
-    index_path: str,
-    topobathy_path: str,
-    floodmap_path: str,
-    hmin: float = 0.05,
-    zoom_range: Union[int, List[int]] = [0, 13],
-    fmt_in: str = "bin",
-    fmt_out: str = "png",
-    merge: bool = True,  # FIXME: this is not implemented yet
-):
-    """Create a downscaled floodmap for (model) region in webmercator tile format
+@njit(cache=True, nogil=True)
+def _resolve_pixel_indices(
+    xm: np.ndarray,
+    ym: np.ndarray,
+    x0: float,
+    y0: float,
+    dx: float,
+    dy: float,
+    cosrot: float,
+    sinrot: float,
+    nr_levels: int,
+    nm_all: np.ndarray,
+    nm_start: np.ndarray,
+    nm_len: np.ndarray,
+    i0_lev: np.ndarray,
+    nmax_lev: np.ndarray,
+    mmax_lev: np.ndarray,
+) -> np.ndarray:
+    """Resolve (xm, ym) pixel coordinates to quadtree cell indices in parallel.
 
-    Parameters
-    ----------
-    zsmax : Union[np.array, xr.DataArray]
-        DataArray with maximum water level (m) for each cell
-    index_path : str
-        Directory with index files
-    topobathy_path : str
-        Directory with topobathy files
-    floodmap_path : str
-        Directory where floodmap files will be stored
-    hmin : float, optional
-        Minimum water depth considered as "flooded", by default 0.05 m
-    zoom_range : Union[int, List[int]], optional
-        Range of zoom levels, by default [0, 13]
-    fmt_in : str, optional
-        Format of the index and topobathy tiles, by default "bin"
-    fmt_out : str, optional
-        Format of the floodmap tiles to be created, by default "png"
-    merge : bool, optional
-        Merge floodmap tiles with existing floodmap tiles
-        (this could for example happen when there is overlap between models),
-        by default True
+    Mirrors the multi-level index lookup in
+    :py:meth:`HurrywaveQuadtreeGrid.get_indices_at_points`, but compiled
+    with numba and parallelised across pixel rows via ``prange``. Pixels
+    that fall outside every refinement level are returned as ``-999``.
+
+    The per-level ``nm`` arrays (one sorted array of ``(m-1)*nmax + (n-1)``
+    per level) are concatenated into ``nm_all`` and located via
+    ``nm_start`` / ``nm_len`` to stay numba-friendly.
     """
-    # if zsmax is an xarray, convert to numpy array
-    if isinstance(zsmax, xr.DataArray):
-        zsmax = zsmax.values
-    zsmax = zsmax.flatten()
-
-    # if only one zoom level is specified, create tiles up to that zoom level (inclusive)
-    if isinstance(zoom_range, int):
-        zoom_range = [0, zoom_range]
-
-    for izoom in range(zoom_range[0], zoom_range[1] + 1):
-        index_zoom_path = os.path.join(index_path, str(izoom))
-
-        if not os.path.exists(index_zoom_path):
-            continue
-
-        # list the available x-folders
-        x_folders = [f.path for f in os.scandir(index_zoom_path) if f.is_dir()]
-
-        # loop over x-folders
-        for x_folder in x_folders:
-            x = os.path.basename(x_folder)
-            # list the available y-files with fmt_in extension
-            y_files = []
-            # Iterate directory
-            for file in os.listdir(x_folder):
-                # check only text files
-                if file.endswith(fmt_in):
-                    y_files.append(file)
-
-            # loop over y-files
-            for y_file in y_files:
-                # read the index file
-                index_fn = os.path.join(x_folder, y_file)
-                if fmt_in == "bin":
-                    ind = np.fromfile(index_fn, dtype="i4")
-                elif fmt_in == "png":
-                    ind = png2int(index_fn)
-
-                # read the topobathy file
-                dep_fn = os.path.join(topobathy_path, str(izoom), x, y_file)
-                if fmt_in == "bin":
-                    dep = np.fromfile(dep_fn, dtype="f4")
-                elif fmt_in == "png":
-                    dep = png2elevation(dep_fn)
-
-                # create the floodmap
-                hmax = zsmax[ind]
-                hmax = hmax - dep
-                hmax[hmax < hmin] = np.nan
-                hmax = hmax.reshape(256, 256)
-
-                # save the floodmap
-                if np.isnan(hmax).all():
-                    # only nans in this tile
+    ny, nx = xm.shape
+    indx = np.full((ny, nx), -999, dtype=np.int32)
+    for i in range(ny):
+        for j in range(nx):
+            x = xm[i, j] - x0
+            y = ym[i, j] - y0
+            xg = x * cosrot - y * sinrot
+            yg = x * sinrot + y * cosrot
+            for ilev in range(nr_levels):
+                dxr = dx / (2.0**ilev)
+                dyr = dy / (2.0**ilev)
+                xi_f = xg / dxr
+                yi_f = yg / dyr
+                if xi_f < 0.0 or yi_f < 0.0:
                     continue
+                iind = int(xi_f)
+                jind = int(yi_f)
+                nmax_l = nmax_lev[ilev]
+                mmax_l = mmax_lev[ilev]
+                if iind >= mmax_l or jind >= nmax_l:
+                    continue
+                target = iind * nmax_l + jind
+                start = nm_start[ilev]
+                end = start + nm_len[ilev]
+                lo = start
+                hi = end
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if nm_all[mid] < target:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                if lo < end and nm_all[lo] == target:
+                    indx[i, j] = i0_lev[ilev] + (lo - start)
+    return indx
 
-                if not os.path.exists(os.path.join(floodmap_path, str(izoom), x)):
-                    os.makedirs(os.path.join(floodmap_path, str(izoom), x))
 
-                floodmap_fn = os.path.join(
-                    floodmap_path, str(izoom), x, y_file.replace(fmt_in, fmt_out)
-                )
-                if fmt_out == "bin":
-                    # And write indices to file
-                    fid = open(floodmap_fn, "wb")
-                    fid.write(hmax)
-                    fid.close()
-                elif fmt_out == "png":
-                    elevation2png(hmax, floodmap_fn)
+def _precompute_quadtree_lookup(quadtree_grid) -> dict:
+    """Extract and flatten quadtree arrays needed by ``_resolve_pixel_indices``.
+
+    Returns a dict of scalars / numpy arrays that together describe the
+    per-refinement-level cell layout: ``x0``, ``y0``, ``dx``, ``dy``,
+    ``cosrot``, ``sinrot``, ``nr_levels``, ``nm_all``, ``nm_start``,
+    ``nm_len``, ``i0_lev``, ``nmax_lev``, ``mmax_lev``.
+    """
+    attrs = quadtree_grid.data.attrs
+    x0 = float(attrs["x0"])
+    y0 = float(attrs["y0"])
+    dx = float(attrs["dx"])
+    dy = float(attrs["dy"])
+    rotation = float(attrs["rotation"])
+    nr_levels = int(attrs["nr_levels"])
+
+    cosrot = math.cos(-rotation * math.pi / 180.0)
+    sinrot = math.sin(-rotation * math.pi / 180.0)
+
+    level = quadtree_grid.data["level"].to_numpy()
+    n = quadtree_grid.data["n"].to_numpy().astype(np.int64)
+    m = quadtree_grid.data["m"].to_numpy().astype(np.int64)
+
+    i0_lev = np.zeros(nr_levels, dtype=np.int64)
+    nmax_lev = np.zeros(nr_levels, dtype=np.int64)
+    mmax_lev = np.zeros(nr_levels, dtype=np.int64)
+    nm_list = []
+    for ilev in range(nr_levels):
+        idx = np.where(level == ilev + 1)[0]
+        if idx.size == 0:
+            # Empty level — still need a placeholder so nm_start/nm_len line up.
+            nm_list.append(np.empty(0, dtype=np.int64))
+            continue
+        i0_lev[ilev] = idx[0]
+        mm = m[idx] - 1
+        nn = n[idx] - 1
+        nmax_l = int(nn.max()) + 1
+        mmax_l = int(mm.max()) + 1
+        nmax_lev[ilev] = nmax_l
+        mmax_lev[ilev] = mmax_l
+        # Cells within a level are stored in sorted (m, n) order in the
+        # quadtree netcdf, so nm is naturally sorted and searchable.
+        nm_list.append(mm * nmax_l + nn)
+
+    nm_len = np.array([len(a) for a in nm_list], dtype=np.int64)
+    nm_start = np.zeros(nr_levels, dtype=np.int64)
+    if nr_levels > 1:
+        nm_start[1:] = np.cumsum(nm_len[:-1])
+    nm_all = (
+        np.concatenate(nm_list).astype(np.int64)
+        if nm_list
+        else np.empty(0, dtype=np.int64)
+    )
+
+    return dict(
+        x0=x0,
+        y0=y0,
+        dx=dx,
+        dy=dy,
+        cosrot=cosrot,
+        sinrot=sinrot,
+        nr_levels=nr_levels,
+        nm_all=nm_all,
+        nm_start=nm_start,
+        nm_len=nm_len,
+        i0_lev=i0_lev,
+        nmax_lev=nmax_lev,
+        mmax_lev=mmax_lev,
+    )
 
 
-def create_topobathy_tiles(
+def make_index_tiles(
+    quadtree_grid,
     root: Union[str, Path],
-    region: gpd.GeoDataFrame,
-    elevation_list: List[dict],
-    index_path: Union[str, Path] = None,
+    region: Optional[gpd.GeoDataFrame] = None,
+    elevation_list: Optional[List[dict]] = None,
+    z_range: Optional[List[float]] = None,
     zoom_range: Union[int, List[int]] = [0, 13],
-    z_range: List[int] = [-20000.0, 20000.0],
-    fmt: str = "bin",
+    fmt: str = "png",
     write_html_viewer: bool = True,
+    max_workers: Optional[int] = None,
     logger: logging.Logger = logger,
 ) -> None:
-    """Create webmercator topobathy tiles for a given region.
+    """Create webmercator index tiles for a HurryWave quadtree grid.
+
+    Index tiles map each pixel of a webmercator XYZ tile to the index of
+    the corresponding quadtree cell (``-999`` where there is no match).
+    Tiles are written to ``<root>/indices/<zoom>/<x>/<y>.<ext>``.
+
+    When both ``elevation_list`` and ``z_range`` are supplied, pixel
+    elevations are resampled from ``elevation_list`` (using the same
+    merge logic as topobathy tiling) and any pixel whose elevation falls
+    outside ``z_range`` is masked out (set to ``-999``). This is how you
+    restrict the tiles to, e.g., wet cells only.
 
     Parameters
     ----------
+    quadtree_grid : HurrywaveQuadtreeGrid
+        Grid component providing ``get_indices_at_points``, ``exterior``,
+        and ``model.crs``.
     root : Union[str, Path]
-        Directory where the topobathy tiles will be stored.
-    region : gpd.GeoDataFrame
-        GeoDataFrame defining the region for which the tiles will be created.
-    elevation_list : List[dict]
-        List of dictionaries containing the bathymetry dataarrays.
-    index_path : Union[str, Path], optional
-        Directory where index tiles are stored, by default None
+        Parent directory; tiles land in ``<root>/indices``.
+    region : gpd.GeoDataFrame, optional
+        GeoDataFrame defining the area for which tiles are generated.
+        Defaults to ``quadtree_grid.exterior``.
+    elevation_list : list of dict, optional
+        Topobathy datasets (same format as
+        :py:func:`hydromt_sfincs.workflows.tiling.create_topobathy_tiles`).
+        Required when ``z_range`` is set.
+    z_range : list of float, optional
+        ``[zmin, zmax]`` pixel-elevation window. Pixels outside this
+        window are masked out. Requires ``elevation_list``.
     zoom_range : Union[int, List[int]], optional
-        Range of zoom levels for which tiles are created, by default [0, 13]
-    z_range : List[int], optional
-        Range of valid elevations, by default [-20000.0, 20000.0]
+        Range of zoom levels, by default ``[0, 13]``. A single int is
+        treated as ``[0, zoom_range]``.
     fmt : str, optional
-        The desired output format of the topobathy tiles, by default "bin". Also "png" and "tif" are supported.
+        Output format: ``"png"`` (default) or ``"bin"`` (raw int32).
     write_html_viewer : bool, optional
-        If True (default), also write an ``index.html`` Leaflet viewer
-        alongside the tiles so they can be previewed in a browser.
+        If True (default) and ``fmt == "png"``, write a Leaflet
+        ``index.html`` alongside the tiles.
+    max_workers : int, optional
+        Number of worker threads used to render tiles concurrently.
+        Defaults to ``os.cpu_count()``. Pass ``1`` to disable
+        parallelism. The numba kernel is GIL-free so threads scale
+        well for pure-index tiling; threads also help overlap file I/O
+        when many small tiles are written.
     """
-    # TODO change the order of the zoom_levels
-    # basing large scale zoom levels on the high-resolution ones prevents memory errors
+    if z_range is not None and elevation_list is None:
+        raise ValueError("`z_range` requires `elevation_list` to be provided.")
 
-    assert len(elevation_list) > 0, "No DEMs provided"
+    if region is None:
+        region = quadtree_grid.exterior
 
-    topobathy_path = os.path.join(root, "topobathy")
+    index_path = os.path.join(root, "indices")
     npix = 256
 
-    # for binary format, use .dat extension
     if fmt == "bin":
         extension = "dat"
-    # for net, tif and png extension and format are the same
     else:
         extension = fmt
 
-    # if only one zoom level is specified, create tiles up to that zoom level (inclusive)
     if isinstance(zoom_range, int):
         zoom_range = [0, zoom_range]
 
-    # get bounding box of region
+    # webmercator bounds of the region
     minx, miny, maxx, maxy = region.total_bounds
     transformer = Transformer.from_crs(region.crs.to_epsg(), 3857)
-
-    # axis order is different for geographic and projected CRS
     if region.crs.is_geographic:
         minx, miny = map(
             max, zip(transformer.transform(miny, minx), [-20037508.34] * 2)
@@ -360,77 +429,94 @@ def create_topobathy_tiles(
         )
         maxx, maxy = map(min, zip(transformer.transform(maxx, maxy), [20037508.34] * 2))
 
-    for izoom in range(zoom_range[0], zoom_range[1] + 1):
-        logger.debug("Processing zoom level " + str(izoom))
+    # transformer from webmercator back to the model CRS for index lookup
+    transformer_inv = Transformer.from_crs(
+        3857, quadtree_grid.model.crs, always_xy=True
+    )
 
-        zoom_path = os.path.join(topobathy_path, str(izoom))
+    # Precompute the grid-lookup tables once; the kernel is called per tile.
+    lut = _precompute_quadtree_lookup(quadtree_grid)
 
-        for transform, col, row in tile_window(izoom, minx, miny, maxx, maxy):
-            # transform is a rasterio Affine object
-            # col, row are the tile indices
-            file_name = os.path.join(zoom_path, str(col), str(row) + "." + extension)
+    def _process_tile(izoom, transform, col, row):
+        """Render a single tile. Safe to call concurrently from worker threads."""
+        zoom_path = os.path.join(index_path, str(izoom))
+        file_name = os.path.join(zoom_path, str(col), f"{row}.{extension}")
 
-            if index_path:
-                # Only make tiles for which there is an index file (can be .dat or .png)
-                index_file_name_dat = os.path.join(
-                    index_path, str(izoom), str(col), str(row) + ".dat"
-                )
-                index_file_name_png = os.path.join(
-                    index_path, str(izoom), str(col), str(row) + ".png"
-                )
-                if not os.path.exists(index_file_name_dat) and not os.path.exists(
-                    index_file_name_png
-                ):
-                    continue
+        # pixel centres in webmercator
+        x = np.arange(0, npix) + 0.5
+        y = np.arange(0, npix) + 0.5
+        x3857, y3857 = transform * (x, y)
+        x3857_2d, y3857_2d = np.meshgrid(x3857, y3857)
 
-            x = np.arange(0, npix) + 0.5
-            y = np.arange(0, npix) + 0.5
-            x3857, y3857 = transform * (x, y)
-            zg = np.float32(np.full([npix, npix], np.nan))
+        # resolve cell indices in model CRS via the nogil numba kernel
+        xm, ym = transformer_inv.transform(x3857_2d, y3857_2d)
+        ind = _resolve_pixel_indices(
+            np.ascontiguousarray(xm, dtype=np.float64),
+            np.ascontiguousarray(ym, dtype=np.float64),
+            lut["x0"],
+            lut["y0"],
+            lut["dx"],
+            lut["dy"],
+            lut["cosrot"],
+            lut["sinrot"],
+            lut["nr_levels"],
+            lut["nm_all"],
+            lut["nm_start"],
+            lut["nm_len"],
+            lut["i0_lev"],
+            lut["nmax_lev"],
+            lut["mmax_lev"],
+        )
 
+        # optionally mask pixels by elevation sampled from elevation_list
+        if elevation_list is not None and z_range is not None:
             da_dep = xr.DataArray(
-                zg,
+                np.full([npix, npix], np.nan, dtype=np.float32),
                 coords={"y": y3857, "x": x3857},
                 dims=["y", "x"],
             )
             da_dep.raster.set_crs(3857)
-
-            # get subgrid bathymetry tile
             da_dep = merge_multi_dataarrays(
                 da_list=elevation_list,
                 da_like=da_dep,
             )
+            z = da_dep.values
+            out_of_range = np.isnan(z) | (z < z_range[0]) | (z > z_range[1])
+            ind[out_of_range] = -999
 
-            if np.isnan(da_dep.values).all():
-                # only nans in this tile
-                continue
-
-            if (
-                np.nanmax(da_dep.values) < z_range[0]
-                or np.nanmin(da_dep.values) > z_range[1]
-            ):
-                # all values in tile outside z_range
-                continue
-
-            if not os.path.exists(os.path.join(zoom_path, str(col))):
-                os.makedirs(os.path.join(zoom_path, str(col)))
-
+        if np.any(ind >= 0):
+            os.makedirs(os.path.join(zoom_path, str(col)), exist_ok=True)
             if fmt == "bin":
-                # And write indices to file
-                fid = open(file_name, "wb")
-                fid.write(da_dep.values)
-                fid.close()
+                with open(file_name, "wb") as fid:
+                    fid.write(ind.astype(np.int32))
             elif fmt == "png":
-                elevation2png(da_dep, file_name)
-            elif fmt == "tif":
-                da_dep.raster.to_raster(file_name)
+                ind = ind.copy()
+                ind[ind == -999] = 0
+                int2png(ind, file_name)
+
+    # Fan the tiles out across a thread pool. The numba kernel releases the
+    # GIL (nogil=True) and the per-tile file I/O is independent, so threads
+    # scale well even though Python code between kernel calls still takes
+    # the GIL.
+    max_workers = max_workers or os.cpu_count() or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for izoom in range(zoom_range[0], zoom_range[1] + 1):
+            logger.debug("Processing zoom level " + str(izoom))
+            for transform, col, row in tile_window(izoom, minx, miny, maxx, maxy):
+                futures.append(
+                    executor.submit(_process_tile, izoom, transform, col, row)
+                )
+        # .result() propagates any exception raised in a worker thread.
+        for future in futures:
+            future.result()
 
     if write_html_viewer and fmt == "png":
-        os.makedirs(topobathy_path, exist_ok=True)
+        os.makedirs(index_path, exist_ok=True)
         write_html(
-            os.path.join(topobathy_path, "index.html"),
-            title="Topobathy tiles",
-            legend_title="Topobathy",
+            os.path.join(index_path, "index.html"),
+            title="Index tiles",
+            legend_title="Cell indices",
             max_native_zoom=zoom_range[1],
         )
 
