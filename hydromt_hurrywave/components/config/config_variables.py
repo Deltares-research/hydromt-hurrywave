@@ -58,37 +58,37 @@ class HurrywaveConfigVariables(BaseSettings):
         description="Simulation stop time",
         json_schema_extra={"always": True},
     )
-    tspinup: float = Field(0.0, ge=0, description="Spin-up duration added to tstart (seconds)")
+    tspinup: float = Field(0.0, ge=0, description="Spin-up duration added to tstart (seconds)", json_schema_extra={"always": True},)
     t0out: float = Field(-999.0, description="Output start time offset from tref (seconds; -999 = use tstart)")
     t1out: float = Field(-999.0, description="Output stop time offset from tref (seconds; -999 = use tstop)")
 
     # ---- Output intervals ----
-    dtmapout: float = Field(3600.0, ge=0, description="Map output interval (seconds); keyword 'dtout' also accepted")
-    dthisout: float = Field(600.0, ge=0, description="Time-series (his) output interval (seconds)")
-    dtsp2out: float = Field(3600.0, ge=0, description="Spectral output interval (seconds)")
-    dtwnd: float = Field(1800.0, ge=0, description="Wind forcing update interval (seconds)")
+    dtmapout: float = Field(3600.0, ge=0, description="Map output interval (seconds); keyword 'dtout' also accepted", json_schema_extra={"always": True},)
+    dthisout: float = Field(600.0, ge=0, description="Time-series (his) output interval (seconds)", json_schema_extra={"always": True},)
+    dtsp2out: float = Field(3600.0, ge=0, description="Spectral output interval (seconds)", json_schema_extra={"always": True},)
+    dtwnd: float = Field(1800.0, ge=0, description="Wind forcing update interval (seconds)", json_schema_extra={"always": True},)
     dtrstout: float = Field(0.0, ge=0, description="Restart file output interval (seconds; 0 = no restart output)")
-    dtmaxout: float = Field(0.0, ge=0, description="Maximum wave-height output interval (seconds; 0 = disabled)")
+    dtmaxout: float = Field(0.0, ge=0, description="Maximum wave-height output interval (seconds; 0 = disabled)", json_schema_extra={"always": True},)
     trstout: float = Field(-999.0, description="Single restart output time offset from tref (seconds; -999 = disabled)")
 
     # ---- Physical constants ----
-    rhoa: float = Field(1.25, gt=0, description="Air density (kg/m³)")
-    rhow: float = Field(1024.0, gt=0, description="Water density (kg/m³)")
+    rhoa: float = Field(1.25, gt=0, description="Air density (kg/m³)", json_schema_extra={"always": True},)
+    rhow: float = Field(1024.0, gt=0, description="Water density (kg/m³)", json_schema_extra={"always": True},)
 
     # ---- I/O format ----
     inputformat: str = Field("asc", description="Input file format ('asc' or 'bin')")
-    outputformat: str = Field("asc", description="Output file format ('asc', 'bin', or 'net')")
+    outputformat: str = Field("net", description="Output file format ('asc', 'bin', or 'net')")
 
     # ---- Numerical diffusion ----
     dmx1: float = Field(0.2, description="Implicit diffusion coefficient")
     dmx2: float = Field(1.0e-5, description="Explicit diffusion coefficient")
 
     # ---- Wave spectrum discretisation ----
-    quadruplets: bool = Field(False, description="Include quadruplet nonlinear interactions")
-    freqmin: float = Field(0.04, gt=0, description="Minimum frequency (Hz)")
-    freqmax: float = Field(0.50, gt=0, description="Maximum frequency (Hz)")
-    nsigma: int = Field(24, ge=1, description="Number of frequency bins")
-    ntheta: int = Field(36, ge=1, description="Number of directional bins")
+    quadruplets: bool = Field(False, description="Include quadruplet nonlinear interactions", json_schema_extra={"always": True},)
+    freqmin: float = Field(0.04, gt=0, description="Minimum frequency (Hz)", json_schema_extra={"always": True},)
+    freqmax: float = Field(0.50, gt=0, description="Maximum frequency (Hz)", json_schema_extra={"always": True},)
+    nsigma: int = Field(24, ge=1, description="Number of frequency bins", json_schema_extra={"always": True},)
+    ntheta: int = Field(36, ge=1, description="Number of directional bins", json_schema_extra={"always": True},)
     gammajsp: float = Field(3.3, gt=0, description="JONSWAP peak enhancement factor for boundary conditions")
 
     # ---- CRS (always written) ----
@@ -106,10 +106,10 @@ class HurrywaveConfigVariables(BaseSettings):
     gambr: float = Field(0.73, description="Breaker parameter (gamma) for depth-induced breaking")
     fbed: float = Field(0.019, description="Bottom friction coefficient")
     redopt: int = Field(1, ge=1, description="Refraction/propagation discretisation option")
-    cdcap: float = Field(0.0025, gt=0, description="Maximum wind drag coefficient")
-    cdfac: float = Field(1.0, description="Wind drag scaling factor")
-    winddrag: str = Field("zijlema", description="Wind drag formulation: 'zijlema', 'wu', or 'hwang'")
-    refraction: bool = Field(True, description="Enable wave refraction")
+    cdcap: float = Field(0.0025, gt=0, description="Maximum wind drag coefficient", json_schema_extra={"always": True},)
+    cdfac: float = Field(1.0, description="Wind drag scaling factor", json_schema_extra={"always": True},)
+    winddrag: str = Field("zijlema", description="Wind drag formulation: 'zijlema', 'wu', or 'hwang'", json_schema_extra={"always": True},)
+    refraction: bool = Field(True, description="Enable wave refraction", json_schema_extra={"always": True},)
     gccorr: bool = Field(True, description="Enable great-circle correction for geographic grids")
     alpha: float = Field(1.0, description="Courant number scaling factor for propagation")
     vmax_zijlema: float = Field(50.0, description="Maximum wind speed for Zijlema drag (m/s)")
@@ -122,7 +122,7 @@ class HurrywaveConfigVariables(BaseSettings):
     # ---- Advanced numerical options ----
     use_lfactor: bool = Field(False, description="Use L-factor correction")
     explicit: bool = Field(False, description="Use explicit (rather than semi-implicit) update scheme")
-    physics: str = Field("st3", description="Wind physics package: 'st3' or 'st6'")
+    physics: str = Field("st3", description="Wind physics package: 'st3', 'st4' or 'st6'", json_schema_extra={"always": True},)
     #snl_semi_implicit: bool = Field(False, description="Use semi-implicit treatment of SNL interactions")
     swell_dissipation: str = Field("babanin2011", description="Swell dissipation formulation: 'babanin2011' or 'ard2009'")
     aopp: float = Field(0.09, description="Coefficient for opposing-swell dissipation")
@@ -162,7 +162,7 @@ class HurrywaveConfigVariables(BaseSettings):
     profile_mode: bool = Field(False, description="Enable profile mode (set cgy to 0.0)")
 
     # ---- Domain files ----
-    qtrfile: Optional[str] = Field(None, description="Quadtree grid file (.nc)")
+    qtrfile: Optional[str] = Field(None, description="Quadtree grid file (.nc)", json_schema_extra={"always": True},)
     #depfile: Optional[str] = Field(None, description="Bathymetry/depth file")
     #mskfile: Optional[str] = Field(None, description="Mask file")
     #indexfile: Optional[str] = Field(None, description="Index file")

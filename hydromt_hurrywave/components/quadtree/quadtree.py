@@ -1,34 +1,25 @@
 import logging
-import os
 from os.path import isfile
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import geopandas as gpd
 import numpy as np
-import pandas as pd
-from pyproj import CRS, Transformer
 import shapely
-
 import xarray as xr
 import xugrid as xu
-
 from hydromt import hydromt_step
 from hydromt.model.components import MeshComponent
 from hydromt.model.processes.grid import create_grid_from_region
+from pyproj import CRS
 
 from hydromt_hurrywave.utils import make_regular_grid
+from hydromt_hurrywave.workflows.map_overlay import (
+    MeshOverlay,
+)
+from hydromt_hurrywave.workflows.tiling import make_index_tiles
+
 from .quadtree_builder import build_quadtree_xugrid, cut_inactive_cells
-
-# optional dependency
-try:
-    import datashader.transfer_functions as tf
-    from datashader import Canvas
-    from datashader.utils import export_image
-
-    HAS_DATASHADER = True
-except ImportError:
-    HAS_DATASHADER = False
 
 if TYPE_CHECKING:
     from hydromt_hurrywave import HurrywaveModel
@@ -48,7 +39,7 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         self._filename: str = "hurrywave.nc"
         self._data: xu.UgridDataset = None
         self.version = 0
-        self.datashader_dataframe = pd.DataFrame()
+        self._overlay = MeshOverlay()
 
         super().__init__(
             model=model,
@@ -237,8 +228,8 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         bathymetry_database : object, optional
             cht_bathymetry database object.
         """
-        self.clear_datashader_dataframe()
-        self.model.quadtree_mask.clear_datashader_dataframe()
+        self._overlay.invalidate()
+        self.model.quadtree_mask.clear_overlay()
 
         self.model.grid_type = "quadtree"
         crs = CRS.from_epsg(epsg)
@@ -263,7 +254,14 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             elevation_list = elevation_list_per_level
 
         self._data = build_quadtree_xugrid(
-            x0, y0, nmax, mmax, dx, dy, rotation, crs,
+            x0,
+            y0,
+            nmax,
+            mmax,
+            dx,
+            dy,
+            rotation,
+            crs,
             refinement_polygons=refinement_polygons,
             elevation_list=elevation_list,
             bathymetry_database=bathymetry_database,
@@ -329,17 +327,28 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         epsg = ds.raster.crs.to_epsg()
 
         self.create(
-            x0=x0, y0=y0, nmax=nmax, mmax=mmax,
-            dx=dx, dy=dy, rotation=rotation, epsg=epsg,
+            x0=x0,
+            y0=y0,
+            nmax=nmax,
+            mmax=mmax,
+            dx=dx,
+            dy=dy,
+            rotation=rotation,
+            epsg=epsg,
             refinement_polygons=refinement_polygons,
             elevation_list=elevation_list,
         )
 
+    @hydromt_step
     def cut_inactive_cells(self):
         """Remove inactive cells (mask == 0) from the grid dataset."""
-        self.clear_datashader_dataframe()
-        self.model.quadtree_mask.clear_datashader_dataframe()
+        self._overlay.invalidate()
+        self.model.quadtree_mask.clear_overlay()
         self._data = cut_inactive_cells(self.data)
+
+    def clear_overlay(self) -> None:
+        """Invalidate the cached edge-overlay dataframe."""
+        self._overlay.invalidate()
 
     def snap_to_grid(self, polyline):
         """Snap a polyline GeoDataFrame to the nearest grid edges."""
@@ -357,45 +366,30 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         )
         return snapped_gdf.set_crs(self.crs)
 
-    def map_overlay(self, file_name, xlim=None, ylim=None, color="black", width=800):
-        """Create a PNG map overlay of the grid using datashader.
+    def map_overlay(
+        self,
+        file_name: Union[str, Path],
+        xlim: Optional[List[float]] = None,
+        ylim: Optional[List[float]] = None,
+        color: str = "black",
+        width: int = 800,
+    ) -> bool:
+        """Render a PNG map overlay of the grid edges.
 
-        Returns ``True`` on success, ``False`` if datashader is unavailable or
-        the grid is empty.
+        One-line wrapper around
+        :py:class:`hydromt_hurrywave.workflows.map_overlay.MeshOverlay`.
         """
-        if not HAS_DATASHADER:
-            logger.warning("Datashader is not available. Please install datashader.")
-            return False
-
         if self.data is None:
             return False
-
-        try:
-            if self.datashader_dataframe.empty:
-                self.get_datashader_dataframe()
-
-            transformer = Transformer.from_crs(4326, 3857, always_xy=True)
-            xl0, yl0 = transformer.transform(xlim[0], ylim[0])
-            xl1, yl1 = transformer.transform(xlim[1], ylim[1])
-            if xl0 > xl1:
-                xl1 += 40075016.68557849
-            xlim = [xl0, xl1]
-            ylim = [yl0, yl1]
-            ratio = (ylim[1] - ylim[0]) / (xlim[1] - xlim[0])
-            height = int(width * ratio)
-            cvs = Canvas(
-                x_range=xlim, y_range=ylim, plot_height=height, plot_width=width
-            )
-            agg = cvs.line(
-                self.datashader_dataframe, x=["x1", "x2"], y=["y1", "y2"], axis=1
-            )
-            img = tf.shade(agg, cmap=color)
-            path_dir = os.path.dirname(file_name) or os.getcwd()
-            name = os.path.splitext(os.path.basename(file_name))[0]
-            export_image(img, name, export_path=path_dir)
-            return True
-        except Exception:
-            return False
+        return self._overlay.render(
+            ugrid=self.data.grid,
+            source_crs=self.model.crs,
+            file_name=file_name,
+            xlim=xlim,
+            ylim=ylim,
+            color=color,
+            width=width,
+        )
 
     def get_indices_at_points(self, x, y):
         """Return 2-D index array of quadtree cell indices at the given points."""
@@ -422,9 +416,9 @@ class HurrywaveQuadtreeGrid(MeshComponent):
         if not hasattr(self, "ifirst"):
             ifirst = np.zeros(nr_refinement_levels, dtype=int)
             for ilev in range(nr_refinement_levels):
-                ifirst[ilev] = np.where(
-                    self.data["level"].to_numpy()[:] == ilev + 1
-                )[0][0]
+                ifirst[ilev] = np.where(self.data["level"].to_numpy()[:] == ilev + 1)[
+                    0
+                ][0]
             self.ifirst = ifirst
 
         ifirst = self.ifirst
@@ -462,8 +456,7 @@ class HurrywaveQuadtreeGrid(MeshComponent):
             if incell[0].size > 0:
                 try:
                     cell_indices = (
-                        _binary_search(nm_lev[ilev], ind[incell[0], incell[1]])
-                        + i0
+                        _binary_search(nm_lev[ilev], ind[incell[0], incell[1]]) + i0
                     )
                     indx[incell[0], incell[1]] = cell_indices
                 except Exception as e:
@@ -471,29 +464,81 @@ class HurrywaveQuadtreeGrid(MeshComponent):
 
         return indx
 
-    # ------------------------------------------------------------------ internal
-    def get_datashader_dataframe(self):
-        """Build an edge-coordinate dataframe for datashader rendering."""
-        x1 = self.data.grid.edge_node_coordinates[:, 0, 0]
-        x2 = self.data.grid.edge_node_coordinates[:, 1, 0]
-        y1 = self.data.grid.edge_node_coordinates[:, 0, 1]
-        y2 = self.data.grid.edge_node_coordinates[:, 1, 1]
+    def create_index_tiles(
+        self,
+        root: Union[str, Path],
+        region: Optional[gpd.GeoDataFrame] = None,
+        elevation_list: Optional[List[dict]] = None,
+        z_range: Optional[List[float]] = None,
+        zoom_range: Union[int, List[int]] = [0, 13],
+        fmt: str = "png",
+        write_html_viewer: bool = True,
+        max_workers: Optional[int] = None,
+    ) -> None:
+        """Create webmercator index tiles for this quadtree grid.
 
-        cross_dateline = False
-        if self.model.crs.is_geographic:
-            if np.max(x1) > 180.0 or np.max(x2) > 180.0:
-                cross_dateline = True
+        Thin wrapper around
+        :py:func:`hydromt_hurrywave.workflows.tiling.make_index_tiles`.
+        Index tiles map each pixel of a webmercator XYZ tile to the
+        corresponding HurryWave cell index.
 
-        transformer = Transformer.from_crs(self.model.crs, 3857, always_xy=True)
-        x1, y1 = transformer.transform(x1, y1)
-        x2, y2 = transformer.transform(x2, y2)
-        if cross_dateline:
-            x1[x1 < 0] += 40075016.68557849
-            x2[x2 < 0] += 40075016.68557849
-        self.datashader_dataframe = pd.DataFrame(dict(x1=x1, y1=y1, x2=x2, y2=y2))
+        Parameters
+        ----------
+        root : Union[str, Path]
+            Parent directory; tiles land in ``<root>/indices``.
+        region : gpd.GeoDataFrame, optional
+            Area for which tiles are generated. Defaults to the grid
+            exterior.
+        elevation_list : list of dict, optional
+            Topobathy datasets to sample pixel elevations from. Required
+            when ``z_range`` is supplied.
+        z_range : list of float, optional
+            ``[zmin, zmax]`` pixel-elevation window. Pixels outside the
+            window are masked out — useful to restrict tiles to, e.g.,
+            wet cells only. Requires ``elevation_list``.
+        zoom_range : Union[int, List[int]], optional
+            Range of zoom levels, by default ``[0, 13]``.
+        fmt : str, optional
+            ``"png"`` (default) or ``"bin"`` (raw int32).
+        write_html_viewer : bool, optional
+            If True (default) and ``fmt == "png"``, also write an
+            ``index.html`` Leaflet viewer alongside the tiles.
+        max_workers : int, optional
+            Number of worker threads used to render tiles concurrently.
+            Defaults to ``os.cpu_count()``. Pass ``1`` to disable
+            parallelism.
 
-    def clear_datashader_dataframe(self):
-        self.datashader_dataframe = pd.DataFrame()
+        Notes
+        -----
+        ``elevation_list`` may be passed in the DDB "name" format (entries
+        with just ``"name"``, ``"zmin"``, ``"zmax"`` keys). In that case
+        the DataArrays are fetched from the model's data catalog
+        automatically using the resolution of the highest zoom level.
+        """
+        if isinstance(zoom_range, int):
+            zr = [0, zoom_range]
+        else:
+            zr = zoom_range
+
+        # Convert DDB-format elevation_list (name-only) to hydromt format (with "da")
+        if elevation_list is not None and len(elevation_list) > 0:
+            if "da" not in elevation_list[0]:
+                res = 40075016.686 / 256 / 2 ** zr[1]
+                elevation_list = self.model._parse_datasets_elevation(
+                    elevation_list, res=res
+                )
+
+        make_index_tiles(
+            quadtree_grid=self,
+            root=root,
+            region=region,
+            elevation_list=elevation_list,
+            z_range=z_range,
+            zoom_range=zr,
+            fmt=fmt,
+            write_html_viewer=write_html_viewer,
+            max_workers=max_workers,
+        )
 
 
 def _binary_search(val_array, vals):

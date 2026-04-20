@@ -82,7 +82,7 @@ class _ObservationPointsBase(ModelComponent):
                 if not parts:
                     continue
                 x, y = float(parts[0]), float(parts[1])
-                name = parts[2] if len(parts) > 2 else str(len(rows) + 1).zfill(4)
+                name = parts[2].strip('"') if len(parts) > 2 else str(len(rows) + 1).zfill(4)
                 rows.append({"name": name, "geometry": shapely.geometry.Point(x, y)})
         self._data = gpd.GeoDataFrame(rows, crs=self.model.crs)
 

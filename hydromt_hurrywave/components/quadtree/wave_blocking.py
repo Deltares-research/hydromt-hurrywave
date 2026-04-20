@@ -416,7 +416,9 @@ class HurrywaveWaveBlocking(ModelComponent):
                         nn = (n[idx] - bn0) * refi
                         mm = (m[idx] - bm0) * refi
                         zgc = zg[nn: nn + refi, mm: mm + refi]
-                        if zgc.size == 0 or not (zgc > cell_threshold).any():
+                        # BUG, somehow zbc can be empty, causing np.nanmax to raise an error.  Skip such cells.
+                        if np.nanmax(zgc) < threshold_level:
+                            # No obstacle above threshold → no blocking
                             continue
 
                         counter += 1

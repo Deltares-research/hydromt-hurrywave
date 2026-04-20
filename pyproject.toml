@@ -11,6 +11,7 @@ dependencies = [
     "affine",
     "geopandas>1.0",
     "hydromt>=1.3.0,<2.0",
+    "numba",
     "numpy",
     "pandas<3.0.0",
     "pydantic",
@@ -34,12 +35,27 @@ classifiers = [
 ]
 dynamic = ["version", "description"]
 
+[project.urls]
+Documentation = "https://deltares.github.io/hydromt_hurrywave/"
+Source = "https://github.com/Deltares/hydromt_hurrywave"
+
 [project.optional-dependencies]
-dev = [
+test = [
     "pytest",
     "pytest-cov",
-    "black",
+]
+lint = [
+    "pre-commit",
     "ruff",
+]
+doc = [
+    "sphinx",
+    "sphinx_rtd_theme",
+    "nbsphinx",
+    "myst-parser",
+]
+dev = [
+    "hydromt_hurrywave[test,lint,doc]",
 ]
 
 [project.entry-points."hydromt.models"]
@@ -48,10 +64,19 @@ hurrywave = "hydromt_hurrywave.hurrywave"
 [tool.flit.module]
 name = "hydromt_hurrywave"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 88
 indent-width = 4
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
-ignore = ["E501"]
+select = ["E", "F", "I", "D"]
+ignore = ["E501", "D211", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D100", "D101", "D102", "D103", "D104"]
