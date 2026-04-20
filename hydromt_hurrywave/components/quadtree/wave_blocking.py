@@ -12,7 +12,14 @@ from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 import pandas as pd
+import shapely
 import xarray as xr
+
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 
 from hydromt import hydromt_step
 from hydromt.model.components import ModelComponent
@@ -21,9 +28,12 @@ from hydromt_hurrywave.utils import make_regular_grid
 from hydromt_hurrywave.workflows.merge import merge_multi_dataarrays
 
 if TYPE_CHECKING:
+    import geopandas as gpd
+
     from hydromt_hurrywave import HurrywaveModel
 
 logger = logging.getLogger(f"hydromt.{__name__}")
+_MATPLOTLIB_MISSING = "matplotlib is required for plotting."
 
 
 class HurrywaveWaveBlocking(ModelComponent):
@@ -41,6 +51,8 @@ class HurrywaveWaveBlocking(ModelComponent):
 
     def __init__(self, model: "HurrywaveModel"):
         self._data: Optional[xr.Dataset] = None
+        self._coastline_gdf: Optional[object] = None   # stored after reprojection
+        self._nr_subgrid_pixels: int = 20
         super().__init__(model=model)
 
     @property
@@ -94,8 +106,9 @@ class HurrywaveWaveBlocking(ModelComponent):
     @hydromt_step
     def create(
         self,
-        elevation_list: list,
+        elevation_list: Optional[list] = None,
         bathymetry_database: Optional[object] = None,
+        coastline_gdf: Optional["gpd.GeoDataFrame"] = None,
         nr_dirs: int = 36,
         nr_subgrid_pixels: int = 20,
         threshold_level: float = -5.0,
@@ -105,14 +118,20 @@ class HurrywaveWaveBlocking(ModelComponent):
     ) -> None:
         """Compute directional wave-blocking coefficients.
 
-        Sub-grid bathymetry is obtained either via a *cht_bathymetry* database
-        (``bathymetry_database`` is not ``None``) or by merging HydroMT data-
-        catalog datasets (same ``elevation_list`` format as
-        :meth:`~hydromt_hurrywave.HurrywaveQuadtreeElevation.create`).
+        Exactly one obstacle source must be supplied:
+
+        * **bathymetry_database** — cht_bathymetry database object; sub-grid
+          elevation is fetched via ``get_bathymetry_on_grid()``.
+        * **elevation_list** — HydroMT data-catalog datasets merged at sub-grid
+          resolution (same format as
+          :meth:`~hydromt_hurrywave.HurrywaveQuadtreeElevation.create`).
+        * **coastline_gdf** — :class:`geopandas.GeoDataFrame` of
+          ``LineString`` / ``MultiLineString`` geometries.  Any sub-grid pixel
+          intersected by a line is treated as a full obstacle.
 
         Parameters
         ----------
-        elevation_list : list
+        elevation_list : list, optional
             *cht_bathymetry* path:
                 List of dataset names / dicts understood by
                 ``bathymetry_database.get_bathymetry_on_grid()``.
@@ -127,18 +146,23 @@ class HurrywaveWaveBlocking(ModelComponent):
                     ]
 
         bathymetry_database : object, optional
-            cht_bathymetry database object.  When provided, sub-grid
-            bathymetry is fetched via its ``get_bathymetry_on_grid()`` method.
-            When ``None`` (default), the HydroMT data-catalog path is used.
+            cht_bathymetry database object.
+        coastline_gdf : geopandas.GeoDataFrame, optional
+            Line geometries representing coastlines / obstacles.  Reprojected
+            to the model CRS automatically if the GeoDataFrame carries a CRS.
+            Cannot be combined with ``bathymetry_database`` or
+            ``elevation_list``.
         nr_dirs : int, optional
             Number of directional bins, by default 36.  Must be even.
         nr_subgrid_pixels : int, optional
             Sub-grid pixels per quadtree cell edge, by default 20.
         threshold_level : float, optional
             Elevation threshold [m] above which a sub-grid pixel is treated as
-            an obstacle, by default -5.0.
+            an obstacle (ignored for the ``coastline_gdf`` path), by default
+            -5.0.
         nrmax : int, optional
-            Maximum number of quadtree cells per processing block, by default 2000.
+            Maximum number of quadtree cells per processing block, by default
+            2000.
         quiet : bool, optional
             Suppress per-block progress messages, by default False.
         progress_bar : object, optional
@@ -146,6 +170,37 @@ class HurrywaveWaveBlocking(ModelComponent):
             with ``set_text``, ``set_minimum``, ``set_maximum``,
             ``set_value``, and ``was_canceled`` methods.
         """
+        # ----------------------------------------------------------
+        # Validate inputs
+        # ----------------------------------------------------------
+        n_sources = sum([
+            bathymetry_database is not None,
+            elevation_list is not None,
+            coastline_gdf is not None,
+        ])
+        if n_sources == 0:
+            raise ValueError(
+                "Provide exactly one of: bathymetry_database, elevation_list, "
+                "or coastline_gdf."
+            )
+        if n_sources > 1:
+            raise ValueError(
+                "bathymetry_database, elevation_list, and coastline_gdf are "
+                "mutually exclusive — supply only one."
+            )
+
+        # ----------------------------------------------------------
+        # Pre-process coastline GDF
+        # ----------------------------------------------------------
+        coastline_union = None
+        if coastline_gdf is not None:
+            if coastline_gdf.crs is not None and coastline_gdf.crs != self.model.crs:
+                coastline_gdf = coastline_gdf.to_crs(self.model.crs)
+            coastline_union = coastline_gdf.union_all()
+
+        # Store for later plotting
+        self._coastline_gdf = coastline_gdf
+        self._nr_subgrid_pixels = nr_subgrid_pixels
         # ----------------------------------------------------------
         # Grid metadata
         # ----------------------------------------------------------
@@ -163,6 +218,7 @@ class HurrywaveWaveBlocking(ModelComponent):
         level = grid["level"].values[:] - 1  # 0-based
         n = grid["n"].values[:] - 1          # 0-based
         m = grid["m"].values[:] - 1          # 0-based
+        cell_mask = self.model.grid.data["mask"].values[:]
 
         # Level boundaries
         ifirst = np.zeros(nr_ref_levs, dtype=int)
@@ -180,7 +236,7 @@ class HurrywaveWaveBlocking(ModelComponent):
         # Pre-parse HydroMT elevation datasets (one set per level)
         # ----------------------------------------------------------
         elevation_list_per_level: Optional[list] = None
-        if bathymetry_database is None:
+        if elevation_list is not None:
             res = dx
             if self.model.crs.is_geographic:
                 res *= 111111.0
@@ -280,10 +336,8 @@ class HurrywaveWaveBlocking(ModelComponent):
                     xg = x0 + cosrot * xg0 - sinrot * yg0
                     yg = y0 + sinrot * xg0 + cosrot * yg0
 
-                    zg = np.full(xg.shape, np.nan)
-
                     # --------------------------------------------------
-                    # Fetch sub-grid bathymetry
+                    # Fetch sub-grid obstacle data
                     # --------------------------------------------------
                     if bathymetry_database is not None:
                         try:
@@ -296,8 +350,8 @@ class HurrywaveWaveBlocking(ModelComponent):
                                 f"(ilev={ilev}, ii={ii}, jj={jj}): {exc}"
                             )
                             continue
-                    else:
-                        # HydroMT data-catalog path
+                        cell_threshold = threshold_level
+                    elif elevation_list is not None:
                         try:
                             da_like = make_regular_grid(
                                 x0=x0,
@@ -327,41 +381,55 @@ class HurrywaveWaveBlocking(ModelComponent):
                                 f"(ilev={ilev}, ii={ii}, jj={jj}): {exc}"
                             )
                             continue
+                        cell_threshold = threshold_level
+                    else:
+                        # Coastline lines path — rasterise onto the block grid
+                        block_box = shapely.box(
+                            float(xg.min()) - dxp,
+                            float(yg.min()) - dyp,
+                            float(xg.max()) + dxp,
+                            float(yg.max()) + dyp,
+                        )
+                        block_lines = coastline_union.intersection(block_box)
+                        zg = _rasterize_lines_on_block(block_lines, xg, yg, dxp, dyp)
+                        cell_threshold = 0.5  # binary raster: values are 0 or 1
 
                     # --------------------------------------------------
-                    # Find cells in this block
+                    # Find cells in this block (vectorised)
                     # --------------------------------------------------
-                    cells_in_block = []
-                    for ic in range(nr_cells_in_level):
-                        idx = cell_indices_in_level[ic]
-                        if (
-                            n[idx] >= bn0 and n[idx] < bn1
-                            and m[idx] >= bm0 and m[idx] < bm1
-                        ):
-                            cells_in_block.append(idx)
+                    ni = n[cell_indices_in_level]
+                    mi = m[cell_indices_in_level]
+                    in_block = (
+                        (ni >= bn0) & (ni < bn1) & (mi >= bm0) & (mi < bm1)
+                    )
+                    cells_in_block = cell_indices_in_level[in_block]
 
-                    if not cells_in_block:
+                    if cells_in_block.size == 0:
                         continue
 
                     # --------------------------------------------------
                     # Compute blocking coefficients per cell
                     # --------------------------------------------------
                     for idx in cells_in_block:
+                        if cell_mask[idx] != 1:
+                            continue
                         nn = (n[idx] - bn0) * refi
                         mm = (m[idx] - bm0) * refi
                         zgc = zg[nn: nn + refi, mm: mm + refi]
-                        # BUG, somehow zbc can be empty, causing np.nanmax to raise an error.  Skip such cells.
-                        if np.nanmax(zgc) < threshold_level:
-                            # No obstacle above threshold → no blocking
+                        if zgc.size == 0 or not (zgc > cell_threshold).any():
                             continue
 
                         counter += 1
-                        cell = _Cell(elevation_map=zgc, threshold_level=threshold_level)
+                        cell = _Cell(elevation_map=zgc, threshold_level=cell_threshold)
+                        ratios = cell.project_on_planes(vectors)   # (nvec,)
+                        block_coefficient[:nvec, idx] = ratios
+                        block_coefficient[nvec:, idx] = ratios
 
-                        for idx_dir in range(nvec):
-                            ratio = cell.project_on_plane(vectors[idx_dir])
-                            block_coefficient[idx_dir, idx] = ratio
-                            block_coefficient[idx_dir + nvec, idx] = ratio
+                        if idx < 10:
+                            fg, ax = plt.subplots()
+                            cell.plot(ax = ax)
+                            ax.set_title(f"Cell {idx} — elevation map with obstacles")
+
 
         if not quiet:
             logger.info(
@@ -391,6 +459,179 @@ class HurrywaveWaveBlocking(ModelComponent):
             }
         )
 
+    def plot(self, cell_idx: int = 0, ax=None):
+        """Plot blocking coefficients as a polar bar chart for one cell.
+
+        Parameters
+        ----------
+        cell_idx : int
+            Cell index to plot, by default 0.
+        ax : matplotlib.axes.Axes, optional
+            Polar axes to draw on.  A new figure is created when ``None``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        if not HAS_MATPLOTLIB:
+            raise ImportError(_MATPLOTLIB_MISSING)
+        if self.data is None:
+            raise ValueError("No blocking data available — run create() or read() first.")
+
+        bc = self.data["blocking_coefficient"].values[:, cell_idx]
+        angles_deg = self.data["directions"].values
+        angles_rad = np.deg2rad(angles_deg)
+        width = np.deg2rad(360.0 / len(angles_rad))
+
+        if ax is None:
+            _, ax = plt.subplots(subplot_kw={"projection": "polar"})
+
+        ax.bar(angles_rad, bc, width=width, bottom=0.0, align="center", alpha=0.7)
+        ax.set_title(f"Wave-blocking coefficients — cell {cell_idx}")
+        ax.set_theta_zero_location("N")
+        ax.set_theta_direction(-1)
+        ax.set_ylim(0, 1)
+        return ax
+
+    # ------------------------------------------------------------------
+    # Spatial helpers
+    # ------------------------------------------------------------------
+
+    def _cell_subgrid_coords(self, cell_idx: int):
+        """Return real-world pixel-centre coordinates for one cell's sub-grid.
+
+        Returns
+        -------
+        xg, yg : ndarray of shape (refi, refi)
+            Real-world pixel-centre coordinates.
+        dxp, dyp : float
+            Sub-grid pixel size.
+        """
+        grid = self.model.quadtree_grid.data
+        x0 = grid.attrs["x0"]
+        y0 = grid.attrs["y0"]
+        dx = grid.attrs["dx"]
+        dy = grid.attrs["dy"]
+        rotation = grid.attrs["rotation"]
+
+        level = int(grid["level"].values[cell_idx]) - 1
+        n_cell = int(grid["n"].values[cell_idx]) - 1
+        m_cell = int(grid["m"].values[cell_idx]) - 1
+
+        dxi = dx / 2**level
+        dyi = dy / 2**level
+        refi = self._nr_subgrid_pixels
+        dxp = dxi / refi
+        dyp = dyi / refi
+
+        cosrot = np.cos(np.radians(rotation))
+        sinrot = np.sin(np.radians(rotation))
+
+        x0v = 0.5 * dxp + m_cell * dxi + np.arange(refi) * dxp
+        y0v = 0.5 * dyp + n_cell * dyi + np.arange(refi) * dyp
+        xg0, yg0 = np.meshgrid(x0v, y0v)
+
+        xg = x0 + cosrot * xg0 - sinrot * yg0
+        yg = y0 + sinrot * xg0 + cosrot * yg0
+        return xg, yg, dxp, dyp
+
+    def _draw_lines_on_ax(self, ax, clipped_gdf, cell_idx: int, dxp: float, dyp: float):
+        """Overlay clipped line geometries on *ax* in pixel-index coordinates."""
+        grid = self.model.quadtree_grid.data
+        x0 = grid.attrs["x0"]
+        y0 = grid.attrs["y0"]
+        dx = grid.attrs["dx"]
+        rotation = grid.attrs["rotation"]
+        cosrot = np.cos(np.radians(rotation))
+        sinrot = np.sin(np.radians(rotation))
+        level = int(grid["level"].values[cell_idx]) - 1
+        dy = grid.attrs["dy"]
+        m_cell = int(grid["m"].values[cell_idx]) - 1
+        n_cell = int(grid["n"].values[cell_idx]) - 1
+        dxi = dx / 2**level
+        dyi = dy / 2**level
+
+        for geom in clipped_gdf.geometry:
+            if geom is None or geom.is_empty:
+                continue
+            parts = geom.geoms if hasattr(geom, "geoms") else [geom]
+            for line in parts:
+                coords = np.array(line.coords)
+                rel_x = coords[:, 0] - x0
+                rel_y = coords[:, 1] - y0
+                lx = cosrot * rel_x + sinrot * rel_y
+                ly = -sinrot * rel_x + cosrot * rel_y
+                px = (lx - m_cell * dxi) / dxp - 0.5
+                py = (ly - n_cell * dyi) / dyp - 0.5
+                ax.plot(px, py, color="red", linewidth=1)
+
+    def plot_map(self, cell_idx: int = 0, ax=None):
+        """Plot the sub-grid obstacle map for one cell.
+
+        Shows the rasterised coastline lines (or a blank grid when no coastline
+        was supplied) and, if a coastline GeoDataFrame is stored, overlays the
+        actual line geometry in pixel-index coordinates.
+
+        Parameters
+        ----------
+        cell_idx : int
+            Cell index to plot, by default 0.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on.  A new figure is created when ``None``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        if not HAS_MATPLOTLIB:
+            raise ImportError(_MATPLOTLIB_MISSING)
+
+        xg, yg, dxp, dyp = self._cell_subgrid_coords(cell_idx)
+        refi = self._nr_subgrid_pixels
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        if self._coastline_gdf is not None:
+            # Rasterise lines onto this cell's sub-grid
+            cell_box = shapely.box(
+                float(xg.min()) - dxp, float(yg.min()) - dyp,
+                float(xg.max()) + dxp, float(yg.max()) + dyp,
+            )
+            clipped = self._coastline_gdf.clip(cell_box)
+
+            zgc = _rasterize_lines_on_block(
+                clipped.union_all() if not clipped.is_empty.all() else None,
+                xg, yg, dxp, dyp,
+            )
+
+            ax.imshow(
+                zgc, origin="lower", aspect="equal",
+                cmap="Greys", vmin=0, vmax=1,
+                extent=[0, refi, 0, refi],
+            )
+
+            # Overlay actual lines in pixel-index space
+            self._draw_lines_on_ax(ax, clipped, cell_idx, dxp, dyp)
+        else:
+            # No obstacle data stored — show empty grid with message
+            ax.imshow(
+                np.zeros((refi, refi)), origin="lower", aspect="equal",
+                cmap="Greys", vmin=0, vmax=1,
+                extent=[0, refi, 0, refi],
+            )
+            ax.text(
+                0.5, 0.5, "No coastline data stored\n(elevation path used)",
+                transform=ax.transAxes, ha="center", va="center", fontsize=9,
+            )
+
+        ax.set_xlim(0, refi)
+        ax.set_ylim(0, refi)
+        ax.set_xlabel("m pixel")
+        ax.set_ylabel("n pixel")
+        ax.set_title(f"Sub-grid obstacle map — cell {cell_idx}")
+        return ax
+
     def set(self, data: xr.Dataset) -> None:
         """Set blocking coefficients from an existing :class:`xarray.Dataset`.
 
@@ -405,6 +646,37 @@ class HurrywaveWaveBlocking(ModelComponent):
     def clear(self) -> None:
         """Remove all wave-blocking data from memory."""
         self._data = None
+
+
+# ---------------------------------------------------------------------------
+# Coastline rasterisation helper
+# ---------------------------------------------------------------------------
+
+def _rasterize_lines_on_block(
+    lines_geom, xg: np.ndarray, yg: np.ndarray, dxp: float, dyp: float
+) -> np.ndarray:
+    """Rasterise line geometries onto a sub-grid block.
+
+    Parameters
+    ----------
+    lines_geom : shapely geometry or None
+        Merged line geometry clipped to (approximately) the block extent.
+    xg, yg : ndarray of shape (nrows, ncols)
+        Real-world coordinates of sub-grid pixel centres.
+    dxp, dyp : float
+        Sub-grid pixel size in x and y.
+
+    Returns
+    -------
+    ndarray of shape (nrows, ncols), dtype float32
+        1.0 where a line crosses the pixel, 0.0 elsewhere.
+    """
+    if lines_geom is None or lines_geom.is_empty:
+        return np.zeros(xg.shape, dtype=np.float32)
+
+    hdx, hdy = dxp / 2.0, dyp / 2.0
+    pixel_boxes = shapely.box(xg - hdx, yg - hdy, xg + hdx, yg + hdy)
+    return shapely.intersects(pixel_boxes, lines_geom).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +698,8 @@ class _Cell:
         self.height, self.width = elevation_map.shape
         self.dx = 1.0
         self.dy = 1.0
+        self.elevation_map = elevation_map
+        self.threshold_level = threshold_level
         self._extract_obstacles(elevation_map, threshold_level)
         self.midpoint, self.circle_radius = self._circle_around_cell(
             self.width, self.height
@@ -473,11 +747,11 @@ class _Cell:
             Normalised projection lengths along the line.
         """
         nobs = point_x.shape[0]
-        px = point_x.reshape(nobs * 4, 1)
-        py = point_y.reshape(nobs * 4, 1)
+        px = point_x.ravel()
+        py = point_y.ravel()
 
         line_vec = line[1] - line[0]
-        point_vec = np.squeeze(np.array([px, py])).T - line[0]
+        point_vec = np.column_stack([px, py]) - line[0]
         denom = np.dot(line_vec, line_vec)
         if denom == 0.0:
             return np.zeros((nobs, 4))
@@ -489,65 +763,136 @@ class _Cell:
     # Public interface
     # ------------------------------------------------------------------
 
+    def plot(self, ax=None):
+        """Plot the sub-grid elevation map (zgc) with the obstacle mask overlaid.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on.  A new figure is created when ``None``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        if not HAS_MATPLOTLIB:
+            raise ImportError(_MATPLOTLIB_MISSING)
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        im = ax.imshow(
+            self.elevation_map, origin="lower", aspect="equal", cmap="terrain",
+            vmin = -100, vmax = 0
+        )
+        obstacle_mask = self.elevation_map > self.threshold_level
+        ax.contour(obstacle_mask.astype(float), levels=[0.5], colors="red", linewidths=1)
+        plt.colorbar(im, ax=ax, label="elevation [m]")
+        ax.set_title(f"Sub-grid elevation (zgc) — threshold {self.threshold_level} m")
+        ax.set_xlabel("m index")
+        ax.set_ylabel("n index")
+        return ax
+
+    def project_on_planes(self, directions: np.ndarray, nrp: int = 100) -> np.ndarray:
+        """Compute blocking fractions for all direction bins in one vectorised pass.
+
+        Parameters
+        ----------
+        directions : ndarray of shape (ndirs, 3)
+            Unit vectors ``[cos θ, sin θ, 0]`` for each direction bin.
+        nrp : int, optional
+            Number of discretisation bins for the union-of-intervals calculation,
+            by default 100.
+
+        Returns
+        -------
+        ndarray of shape (ndirs,)
+            Blocking ratios in [0, 1].
+        """
+        ndirs = directions.shape[0]
+        nobs = self.obscor_x.shape[0]
+        if nobs == 0:
+            return np.zeros(ndirs)
+
+        cx, cy = self.midpoint
+        r = self.circle_radius
+        W, H = float(self.width), float(self.height)
+
+        # --- Screen geometry for all directions simultaneously --- (ndirs,)
+        angle_rad = np.arctan2(directions[:, 1], directions[:, 0])
+        proj_mid_x = cx + r * np.cos(angle_rad + np.pi)
+        proj_mid_y = cy + r * np.sin(angle_rad + np.pi)
+        ortho_x = -directions[:, 1]
+        ortho_y =  directions[:, 0]
+
+        x0 = proj_mid_x - W * ortho_x
+        y0 = proj_mid_y - H * ortho_y
+        x1 = proj_mid_x + W * ortho_x
+        y1 = proj_mid_y + H * ortho_y
+
+        # line_vec: (ndirs, 2),  denom: (ndirs,)
+        line_vec = np.stack([x1 - x0, y1 - y0], axis=1)
+        denom = np.einsum("di,di->d", line_vec, line_vec)
+
+        # --- Clip screen to actual cell extent ---
+        corners = np.array([[0., 0.], [W, 0.], [W, H], [0., H]])  # (4, 2)
+        # point_vec from screen start to each corner: (ndirs, 4, 2)
+        pvc = corners[np.newaxis] - np.stack([x0, y0], axis=1)[:, np.newaxis]
+        # proj_corners: (ndirs, 4)
+        proj_corners = np.einsum("nci,ni->nc", pvc, line_vec) / denom[:, np.newaxis]
+        min_c = proj_corners.min(axis=1)  # (ndirs,)
+        max_c = proj_corners.max(axis=1)
+
+        dx = x1 - x0
+        dy = y1 - y0
+        x0c = x0 + min_c * dx
+        y0c = y0 + min_c * dy
+        x1c = x0 + max_c * dx
+        y1c = y0 + max_c * dy
+
+        # clipped_vec: (ndirs, 2),  clipped_denom: (ndirs,)
+        clipped_vec = np.stack([x1c - x0c, y1c - y0c], axis=1)
+        clipped_denom = np.einsum("di,di->d", clipped_vec, clipped_vec)
+
+        # --- Project all obstacle corners onto every clipped screen ---
+        # obs_pts: (nobs*4, 2)
+        obs_pts = np.column_stack([self.obscor_x.ravel(), self.obscor_y.ravel()])
+        # point_vec from clipped screen start to each obstacle corner: (ndirs, nobs*4, 2)
+        pvo = obs_pts[np.newaxis] - np.stack([x0c, y0c], axis=1)[:, np.newaxis]
+        # proj_obs_flat: (ndirs, nobs*4)  →  (ndirs, nobs, 4)
+        proj_obs = (
+            np.einsum("npi,ni->np", pvo, clipped_vec) / clipped_denom[:, np.newaxis]
+        ).reshape(ndirs, nobs, 4)
+
+        # min/max shadow interval per obstacle per direction: (ndirs, nobs)
+        min_obs = np.clip(proj_obs.min(axis=2), 0.0, 1.0)
+        max_obs = np.clip(proj_obs.max(axis=2), 0.0, 1.0)
+
+        # --- Union of intervals via difference-array trick ---
+        # diff[d, k] += 1 at interval start, -= 1 at interval end;
+        # cumsum gives covered/not covered at each bin.
+        i0_all = (min_obs * nrp).astype(int)  # (ndirs, nobs)
+        i1_all = (max_obs * nrp).astype(int)
+        diff = np.zeros((ndirs, nrp + 1), dtype=np.int16)
+        d_idx = np.repeat(np.arange(ndirs), nobs)
+        np.add.at(diff, (d_idx, i0_all.ravel()), 1)
+        np.add.at(diff, (d_idx, i1_all.ravel()), -1)
+        covered = np.cumsum(diff, axis=1)[:, :nrp] > 0
+
+        return covered.sum(axis=1) / nrp
+
     def project_on_plane(self, incoming_direction: np.ndarray) -> float:
-        """Compute the fraction of the projection plane blocked by obstacles.
+        """Compute the blocking fraction for a single direction.
+
+        Thin wrapper around :meth:`project_on_planes` for convenience.
 
         Parameters
         ----------
         incoming_direction : array-like of length 3
-            Unit vector ``[cos θ, sin θ, 0]`` for the wave direction.
+            Unit vector ``[cos θ, sin θ, 0]``.
 
         Returns
         -------
         float
-            Blocking ratio in [0, 1].
         """
-        if self.obscor_x.shape[0] == 0:
-            return 0.0
-
-        angle_rad = np.arctan2(incoming_direction[1], incoming_direction[0])
-        cx, cy = self.midpoint
-        r = self.circle_radius
-
-        proj_mid_x = cx + r * np.cos(angle_rad + np.pi)
-        proj_mid_y = cy - r * np.sin(angle_rad + np.pi)
-
-        ortho = (-incoming_direction[1], incoming_direction[0])
-        x0 = proj_mid_x - self.width * ortho[0]
-        y0 = proj_mid_y - self.height * ortho[1]
-        x1 = proj_mid_x + self.width * ortho[0]
-        y1 = proj_mid_y + self.height * ortho[1]
-
-        # Project cell corners to find the clipped line extent
-        corners_x = np.array([[0.0, float(self.width), float(self.width), 0.0]])
-        corners_y = np.array([[0.0, 0.0, float(self.height), float(self.height)]])
-        line_corners = np.array([[x0, y0], [x1, y1]])
-        proj_corners = self._project_points_on_line(
-            corners_x, corners_y, line_corners
-        )
-        min_c = float(proj_corners.min())
-        max_c = float(proj_corners.max())
-
-        # Clip line
-        x0c = x0 + min_c * (x1 - x0)
-        y0c = y0 + min_c * (y1 - y0)
-        x1c = x0 + max_c * (x1 - x0)
-        y1c = y0 + max_c * (y1 - y0)
-        line_clipped = np.array([[x0c, y0c], [x1c, y1c]])
-
-        # Project obstacle corners
-        proj_obs = self._project_points_on_line(
-            self.obscor_x, self.obscor_y, line_clipped
-        )
-        min_obs = np.clip(proj_obs.min(axis=1), 0.0, 1.0)
-        max_obs = np.clip(proj_obs.max(axis=1), 0.0, 1.0)
-
-        # Discretise into bins and accumulate blocked fraction
-        nrp = 100
-        pnts = np.zeros(nrp, dtype=np.int8)
-        for i0, i1 in zip(
-            (min_obs * nrp).astype(int), (max_obs * nrp).astype(int)
-        ):
-            pnts[i0:i1] = 1
-
-        return float(np.sum(pnts)) / nrp
+        return float(self.project_on_planes(np.atleast_2d(incoming_direction))[0])

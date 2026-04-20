@@ -256,7 +256,7 @@ def merge_dataarrays(
         return da1
 
     ## reproject da2 and reset nodata value to match da1 nodata
-    da2 = da2.load().raster.reproject_like(da1, method=reproj_method)
+    da2 = da2.raster.reproject_like(da1, method=reproj_method).load()
     da2 = da2.raster.mask_nodata()
 
     da2 = _add_offset_mask_invalid(
