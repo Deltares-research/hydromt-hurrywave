@@ -102,6 +102,12 @@ class HurrywaveConfig(ModelComponent):
           to ``True`` against the current field values **and** the value
           differs from the field default.
 
+        Fields are grouped by their ``"section"`` entry in ``json_schema_extra``
+        and written under ``# <section>`` headers in the canonical order
+        (Time, Domain, Physics, Numerics, Boundaries, Meteo, Output, Debug).
+        Any unknown sections are appended at the end.  Extra (undeclared)
+        fields land in a trailing ``# Extra`` block.
+
         ``None`` values are never written regardless of policy.
         Extra fields (not declared in the model) are always written when
         their value is not ``None``.
@@ -114,56 +120,81 @@ class HurrywaveConfig(ModelComponent):
         model_fields = HurrywaveConfigVariables.model_fields
         data_dict = self.data.model_dump()
 
-        with open(self.filename, "w") as fid:
-            for key, value in data_dict.items():
-                # Never write None
-                if value is None:
-                    continue
+        section_order = [
+            "Time",
+            "Domain",
+            "Physics",
+            "Numerics",
+            "Boundaries",
+            "Meteo",
+            "Output",
+            "Debug",
+        ]
+        sections: Dict[str, list] = {}
 
-                field_info = model_fields.get(key)
-                extra = (field_info.json_schema_extra or {}) if field_info else {}
+        for key, value in data_dict.items():
+            # Never write None
+            if value is None:
+                continue
 
-                # Evaluate condition when present
-                condition = extra.get("condition")
-                if condition is not None:
+            field_info = model_fields.get(key)
+            extra = (field_info.json_schema_extra or {}) if field_info else {}
+
+            # Evaluate condition when present
+            condition = extra.get("condition")
+            if condition is not None:
+                try:
+                    if not eval(condition, {}, data_dict):  # noqa: S307
+                        continue
+                except Exception:
+                    pass  # condition evaluation failed — write anyway
+
+            # Decide always vs non-default
+            always = extra.get("always", False)
+            if not always:
+                if field_info is not None:
                     try:
-                        if not eval(condition, {}, data_dict):  # noqa: S307
+                        if value == field_info.default:
                             continue
                     except Exception:
-                        pass  # condition evaluation failed — write anyway
+                        pass  # exotic default type — write anyway
+                # Extra fields (not declared) are always written
 
-                # Decide always vs non-default
-                always = extra.get("always", False)
-                if not always:
-                    if field_info is not None:
-                        try:
-                            if value == field_info.default:
-                                continue
-                        except Exception:
-                            pass  # exotic default type — write anyway
-                    # Extra fields (not declared) are always written
+            # Serialise
+            # Preserve float type if the field is declared as float
+            if field_info is not None and field_info.annotation is float:
+                value = float(value) if not isinstance(value, float) else value
+            else:
+                value = _convert_to_number(value)
 
-                # Serialise and write
-                # Preserve float type if the field is declared as float
-                if field_info is not None and field_info.annotation is float:
-                    value = float(value) if not isinstance(value, float) else value
-                else:
-                    value = _convert_to_number(value)
+            if isinstance(value, (int, float)):
+                line = f"{key.ljust(20)} = {value}"
+            elif isinstance(value, list):
+                line = f"{key.ljust(20)} = {' '.join(str(v) for v in value)}"
+            elif hasattr(value, "strftime"):
+                line = f"{key.ljust(20)} = {value.strftime('%Y%m%d %H%M%S')}"
+            else:
+                line = f"{key.ljust(20)} = {value}"
 
-                if isinstance(value, (int, float)):
-                    string = f"{key.ljust(20)} = {value}"
-                elif isinstance(value, list):
-                    string = f"{key.ljust(20)} = {' '.join(str(v) for v in value)}"
-                elif hasattr(value, "strftime"):
-                    string = f"{key.ljust(20)} = {value.strftime('%Y%m%d %H%M%S')}"
-                else:
-                    string = f"{key.ljust(20)} = {value}"
+            # Add description as comment
+            if write_description and field_info and field_info.description:
+                line = f"{line.ljust(50)} # {field_info.description}"
 
-                # Add description as comment
-                if write_description and field_info and field_info.description:
-                    string = f"{string.ljust(50)} # {field_info.description}"
+            section = extra.get("section") or ("Extra" if field_info is None else "Other")
+            sections.setdefault(section, []).append(line)
 
-                fid.write(string + "\n")
+        ordered = [s for s in section_order if s in sections]
+        ordered += [s for s in sections if s not in section_order and s != "Extra"]
+        if "Extra" in sections:
+            ordered.append("Extra")
+
+        with open(self.filename, "w") as fid:
+            for i, section in enumerate(ordered):
+                if i > 0:
+                    fid.write("\n")
+                fid.write(f"# {section}\n")
+                for line in sections[section]:
+                    fid.write(line + "\n")
 
     def get(self, key: str, fallback: Any = None, abs_path: bool = False) -> Any:
         """Get a configuration value by key."""
