@@ -71,6 +71,10 @@ class HurrywaveConfig(ModelComponent):
                     val = datetime.strptime(val, "%Y%m%d %H%M%S")
                 except ValueError:
                     pass
+            elif val.lower() in ("yes", "true"):
+                val = True
+            elif val.lower() in ("no", "false"):
+                val = False
             else:
                 try:
                     val = literal_eval(val)
@@ -161,24 +165,28 @@ class HurrywaveConfig(ModelComponent):
                 # Extra fields (not declared) are always written
 
             # Serialise
-            # Preserve float type if the field is declared as float
-            if field_info is not None and field_info.annotation is float:
-                value = float(value) if not isinstance(value, float) else value
+            # Booleans -> yes/no (check before numeric branch since bool is an int)
+            if isinstance(value, bool):
+                line = f"{key.ljust(25)} = {'yes' if value else 'no'}"
             else:
-                value = _convert_to_number(value)
+                # Preserve float type if the field is declared as float
+                if field_info is not None and field_info.annotation is float:
+                    value = float(value) if not isinstance(value, float) else value
+                else:
+                    value = _convert_to_number(value)
 
-            if isinstance(value, (int, float)):
-                line = f"{key.ljust(20)} = {value}"
-            elif isinstance(value, list):
-                line = f"{key.ljust(20)} = {' '.join(str(v) for v in value)}"
-            elif hasattr(value, "strftime"):
-                line = f"{key.ljust(20)} = {value.strftime('%Y%m%d %H%M%S')}"
-            else:
-                line = f"{key.ljust(20)} = {value}"
+                if isinstance(value, (int, float)):
+                    line = f"{key.ljust(25)} = {value}"
+                elif isinstance(value, list):
+                    line = f"{key.ljust(25)} = {' '.join(str(v) for v in value)}"
+                elif hasattr(value, "strftime"):
+                    line = f"{key.ljust(25)} = {value.strftime('%Y%m%d %H%M%S')}"
+                else:
+                    line = f"{key.ljust(25)} = {value}"
 
             # Add description as comment
             if write_description and field_info and field_info.description:
-                line = f"{line.ljust(50)} # {field_info.description}"
+                line = f"{line.ljust(60)} # {field_info.description}"
 
             section = extra.get("section") or ("Extra" if field_info is None else "Other")
             sections.setdefault(section, []).append(line)
