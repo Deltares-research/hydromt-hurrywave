@@ -78,13 +78,8 @@ class HurrywaveConfigVariables(BaseSettings):
     rhoa: float = Field(1.25, gt=0, description="Air density (kg/m³)", json_schema_extra={"always": True, "section": "Physics"})
     rhow: float = Field(1024.0, gt=0, description="Water density (kg/m³)", json_schema_extra={"always": True, "section": "Physics"})
 
-    # ---- I/O format ----
-    inputformat: str = Field("asc", description="Input file format ('asc' or 'bin')", json_schema_extra={"section": "Domain"})
-    outputformat: str = Field("net", description="Output file format ('asc', 'bin', or 'net')", json_schema_extra={"section": "Output"})
-
     # ---- Numerical diffusion ----
     dmx1: float = Field(0.2, description="Implicit diffusion coefficient", json_schema_extra={"section": "Numerics"})
-    dmx2: float = Field(1.0e-5, description="Explicit diffusion coefficient", json_schema_extra={"section": "Numerics"})
 
     # ---- Wave spectrum discretisation ----
     quadruplets: bool = Field(False, description="Include quadruplet nonlinear interactions", json_schema_extra={"always": True, "section": "Physics"})
@@ -102,13 +97,9 @@ class HurrywaveConfigVariables(BaseSettings):
 
     # ---- Numerical options ----
     spinup_meteo: bool = Field(False, description="Apply meteorological forcing during spin-up period", json_schema_extra={"section": "Meteo"})
-    cglim: float = Field(1.0, description="Group velocity limiter (fraction of deep-water value)", json_schema_extra={"section": "Numerics"})
-    #iterperc: float = Field(-999.0, description="Iteration convergence threshold (% cells; -999 = no iteration)")
-    #iterthresh: float = Field(0.1, description="Iteration residual threshold")
     spwmergefrac: float = Field(0.5, description="Spiderweb wind merging fraction", json_schema_extra={"section": "Meteo"})
     gambr: float = Field(0.73, description="Breaker parameter (gamma) for depth-induced breaking", json_schema_extra={"section": "Physics"})
     fbed: float = Field(0.019, description="Bottom friction coefficient", json_schema_extra={"section": "Physics"})
-    redopt: int = Field(1, ge=1, description="Refraction/propagation discretisation option", json_schema_extra={"section": "Numerics"})
     cdcap: float = Field(0.0025, gt=0, description="Maximum wind drag coefficient", json_schema_extra={"always": True, "section": "Meteo"})
     cdfac: float = Field(1.0, description="Wind drag scaling factor", json_schema_extra={"always": True, "section": "Meteo"})
     winddrag: str = Field("zijlema", description="Wind drag formulation: 'zijlema', 'wu', or 'hwang'", json_schema_extra={"always": True, "section": "Meteo"})
