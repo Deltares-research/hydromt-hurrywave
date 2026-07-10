@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
+import numba
 import numpy as np
 import pandas as pd
 import shapely
@@ -218,7 +219,7 @@ class HurrywaveWaveBlocking(ModelComponent):
         level = grid["level"].values[:] - 1  # 0-based
         n = grid["n"].values[:] - 1          # 0-based
         m = grid["m"].values[:] - 1          # 0-based
-        cell_mask = self.model.grid.data["mask"].values[:]
+        cell_mask = self.model.quadtree_grid.data["mask"].values[:]
 
         # Level boundaries
         ifirst = np.zeros(nr_ref_levs, dtype=int)
@@ -233,34 +234,30 @@ class HurrywaveWaveBlocking(ModelComponent):
         ilast[nr_ref_levs - 1] = nr_cells - 1
 
         # ----------------------------------------------------------
-        # Pre-parse HydroMT elevation datasets (one set per level)
+        # Base resolution for elevation datasets — parsed lazily per level
         # ----------------------------------------------------------
-        elevation_list_per_level: Optional[list] = None
+        _elev_res_base: Optional[float] = None
         if elevation_list is not None:
-            res = dx
+            _elev_res_base = dx
             if self.model.crs.is_geographic:
-                res *= 111111.0
-            elevation_list_per_level = []
-            for ilev in range(nr_ref_levs):
-                res_subgrid = (res / 2**ilev) / nr_subgrid_pixels
-                elevation_list_per_level.append(
-                    self.model._parse_datasets_elevation(
-                        elevation_list, res=res_subgrid
-                    )
-                )
+                _elev_res_base *= 111111.0
 
         # ----------------------------------------------------------
-        # Directional vectors (half-circle, mirrored for full 360°)
+        # Directional vectors (half-circle, mirrored for full 360° — symmetric by design)
+        # Angles are in compass convention (0° = north, clockwise); converted to
+        # math convention (0° = east, CCW) for the direction vectors.
         # ----------------------------------------------------------
         nvec = nr_dirs // 2
         dtheta = 360.0 / nr_dirs
         angles_half = np.linspace(
             0.5 * dtheta, 180.0 + 0.5 * dtheta, nvec, endpoint=False
         )
-        radians_half = np.deg2rad(angles_half)
+        math_radians_half = np.deg2rad(90.0 - angles_half)  # compass → math
         vectors = np.array(
-            [[np.cos(a), np.sin(a), 0] for a in radians_half]
+            [[np.cos(a), np.sin(a), 0] for a in math_radians_half]
         )
+        cos_angles = np.ascontiguousarray(vectors[:, 0])
+        sin_angles = np.ascontiguousarray(vectors[:, 1])
 
         # ----------------------------------------------------------
         # Blocking coefficient array: (nr_dirs, nr_cells)
@@ -303,6 +300,20 @@ class HurrywaveWaveBlocking(ModelComponent):
                 progress_bar.set_value(0)
 
             ib = 0
+
+            if not quiet:
+                logger.info(
+                    f"Processing level {ilev + 1}/{nr_ref_levs} — {nr_cells_in_level} cells, {nrbm}x{nrbn} blocks"
+                )
+
+            # Opt 3: fetch elevation datasets for this level only now (lazy per-level)
+            parsed_elev_list: Optional[list] = None
+            if _elev_res_base is not None:
+                res_subgrid = (_elev_res_base / 2**ilev) / nr_subgrid_pixels
+                parsed_elev_list = self.model._parse_datasets_elevation(
+                    elevation_list, res=res_subgrid
+                )
+
             for ii in range(nrbm):
                 for jj in range(nrbn):
 
@@ -311,6 +322,12 @@ class HurrywaveWaveBlocking(ModelComponent):
                         if progress_bar.was_canceled():
                             logger.warning("Wave-blocking computation cancelled.")
                             return
+                        
+                    if not quiet:
+                        logger.info(
+                            f"Processing block (ilev={ilev}, ii={ii}, jj={jj}) ..."
+                        )
+
 
                     ib += 1
 
@@ -358,8 +375,8 @@ class HurrywaveWaveBlocking(ModelComponent):
                                 y0=y0,
                                 dx=dxp,
                                 dy=dyp,
-                                mmax=(bm1 - bm0) * refi,
-                                nmax=(bn1 - bn0) * refi,
+                                mmax=bm1 * refi,
+                                nmax=bn1 * refi,
                                 rotation=rotation,
                                 crs=self.model.crs,
                                 mmin=bm0 * refi,
@@ -367,7 +384,7 @@ class HurrywaveWaveBlocking(ModelComponent):
                                 make_ugrid=False,
                             )
                             da_dep = merge_multi_dataarrays(
-                                da_list=elevation_list_per_level[ilev],
+                                da_list=parsed_elev_list,
                                 da_like=da_like,
                                 buffer_cells=0,
                                 interp_method="linear",
@@ -376,9 +393,8 @@ class HurrywaveWaveBlocking(ModelComponent):
                             # da_dep.values has shape (nmax_sub, mmax_sub)
                             zg = da_dep.values
                         except Exception as exc:
-                            logger.error(
-                                f"Error merging elevation datasets for block "
-                                f"(ilev={ilev}, ii={ii}, jj={jj}): {exc}"
+                            logger.debug(
+                                f"Skipping block (ilev={ilev}, ii={ii}, jj={jj}): {exc}"
                             )
                             continue
                         cell_threshold = threshold_level
@@ -408,29 +424,40 @@ class HurrywaveWaveBlocking(ModelComponent):
                         continue
 
                     # --------------------------------------------------
-                    # Compute blocking coefficients per cell
+                    # Opt 5: skip block if no pixel exceeds threshold
                     # --------------------------------------------------
-                    for idx in cells_in_block:
-                        if cell_mask[idx] != 1:
-                            continue
+                    if not np.any(zg > cell_threshold):
+                        continue
+
+                    # --------------------------------------------------
+                    # Opt 2: collect patches for all active cells at once
+                    # --------------------------------------------------
+                    active_indices = [
+                        idx for idx in cells_in_block if cell_mask[idx] == 1
+                    ]
+                    if not active_indices:
+                        continue
+
+                    n_active = len(active_indices)
+                    patches = np.empty((n_active, refi, refi), dtype=np.float64)
+                    for k, idx in enumerate(active_indices):
                         nn = (n[idx] - bn0) * refi
                         mm = (m[idx] - bm0) * refi
-                        zgc = zg[nn: nn + refi, mm: mm + refi]
-                        # BUG, somehow zbc can be empty, causing np.nanmax to raise an error.  Skip such cells.
-                        if np.nanmax(zgc) < threshold_level:
-                            # No obstacle above threshold → no blocking
-                            continue
+                        patches[k] = zg[nn: nn + refi, mm: mm + refi]
 
-                        counter += 1
-                        cell = _Cell(elevation_map=zgc, threshold_level=cell_threshold)
-                        ratios = cell.project_on_planes(vectors)   # (nvec,)
-                        block_coefficient[:nvec, idx] = ratios
-                        block_coefficient[nvec:, idx] = ratios
+                    # --------------------------------------------------
+                    # Opt 1 & 2: JIT-compiled batch blocking computation
+                    # --------------------------------------------------
+                    ratios = _blocking_kernel(
+                        patches, cell_threshold, cos_angles, sin_angles, 100
+                    )  # (n_active, nvec)
 
-                        if idx < 10:
-                            fg, ax = plt.subplots()
-                            cell.plot(ax = ax)
-                            ax.set_title(f"Cell {idx} — elevation map with obstacles")
+                    for k, idx in enumerate(active_indices):
+                        r = ratios[k]
+                        if r.any():
+                            block_coefficient[:nvec, idx] = r
+                            block_coefficient[nvec:, idx] = r
+                            counter += 1
 
 
         if not quiet:
@@ -481,14 +508,15 @@ class HurrywaveWaveBlocking(ModelComponent):
             raise ValueError("No blocking data available — run create() or read() first.")
 
         bc = self.data["blocking_coefficient"].values[:, cell_idx]
-        angles_deg = self.data["directions"].values
-        angles_rad = np.deg2rad(angles_deg)
-        width = np.deg2rad(360.0 / len(angles_rad))
+        angles_deg = self.data["directions"].values  # compass convention (0°=north, CW)
+        compass_rad = np.deg2rad(angles_deg)
+        width = np.deg2rad(360.0 / len(angles_deg))
 
         if ax is None:
             _, ax = plt.subplots(subplot_kw={"projection": "polar"})
 
-        ax.bar(angles_rad, bc, width=width, bottom=0.0, align="center", alpha=0.7)
+        ax.bar(compass_rad, bc, width=width, bottom=0.0, align="center", alpha=0.7)
+
         ax.set_title(f"Wave-blocking coefficients — cell {cell_idx}")
         ax.set_theta_zero_location("N")
         ax.set_theta_direction(-1)
@@ -654,6 +682,11 @@ class HurrywaveWaveBlocking(ModelComponent):
 # Coastline rasterisation helper
 # ---------------------------------------------------------------------------
 
+def _bounds_overlap(a: tuple, b: tuple) -> bool:
+    """Return True if bounding boxes (xmin, ymin, xmax, ymax) overlap."""
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
 def _rasterize_lines_on_block(
     lines_geom, xg: np.ndarray, yg: np.ndarray, dxp: float, dyp: float
 ) -> np.ndarray:
@@ -679,6 +712,186 @@ def _rasterize_lines_on_block(
     hdx, hdy = dxp / 2.0, dyp / 2.0
     pixel_boxes = shapely.box(xg - hdx, yg - hdy, xg + hdx, yg + hdy)
     return shapely.intersects(pixel_boxes, lines_geom).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Numba JIT kernel — batch blocking computation
+# ---------------------------------------------------------------------------
+
+@numba.njit(cache=True)
+def _blocking_kernel(
+    patches: np.ndarray,
+    threshold: float,
+    cos_angles: np.ndarray,
+    sin_angles: np.ndarray,
+    nrp: int,
+) -> np.ndarray:
+    """Compute directional blocking fractions for a batch of sub-grid patches.
+
+    Parameters
+    ----------
+    patches : float64 array (n_cells, H, W)
+        Sub-grid elevation patches, one per active cell.
+    threshold : float
+        Elevation threshold — pixels above this are obstacles.
+    cos_angles, sin_angles : float64 array (ndirs,)
+        Direction vector components for the half-circle bins.
+    nrp : int
+        Number of discretisation bins for the union-of-intervals calculation.
+
+    Returns
+    -------
+    float64 array (n_cells, ndirs)
+        Blocking ratios in [0, 1].
+    """
+    n_cells = patches.shape[0]
+    H = patches.shape[1]
+    W = patches.shape[2]
+    ndirs = cos_angles.shape[0]
+
+    W_f = float(W)
+    H_f = float(H)
+    cx_mid = W_f / 2.0
+    cy_mid = H_f / 2.0
+    r = math.sqrt(W_f * W_f + H_f * H_f) / 2.0
+
+    result = np.zeros((n_cells, ndirs))
+
+    # Pre-compute clipped screen geometry once — identical for every cell
+    # (all cells in a block share the same patch dimensions refi × refi)
+    x0c_arr = np.empty(ndirs)
+    y0c_arr = np.empty(ndirs)
+    vx_arr = np.empty(ndirs)
+    vy_arr = np.empty(ndirs)
+    cdenom_arr = np.empty(ndirs)
+
+    for d in range(ndirs):
+        cd = cos_angles[d]
+        sd = sin_angles[d]
+        angle = math.atan2(sd, cd)
+        pmx = cx_mid + r * math.cos(angle + math.pi)
+        pmy = cy_mid + r * math.sin(angle + math.pi)
+        ox = -sd
+        oy = cd
+        x0 = pmx - W_f * ox
+        y0 = pmy - H_f * oy
+        x1 = pmx + W_f * ox
+        y1 = pmy + H_f * oy
+        dx = x1 - x0
+        dy = y1 - y0
+        denom = dx * dx + dy * dy
+        if denom == 0.0:
+            x0c_arr[d] = x0
+            y0c_arr[d] = y0
+            vx_arr[d] = 0.0
+            vy_arr[d] = 0.0
+            cdenom_arr[d] = 0.0
+            continue
+        # Clip screen to cell corners: (0,0), (W,0), (W,H), (0,H)
+        min_c = 1.0e18
+        max_c = -1.0e18
+        for k in range(4):
+            if k == 0:
+                ck_x = 0.0; ck_y = 0.0
+            elif k == 1:
+                ck_x = W_f; ck_y = 0.0
+            elif k == 2:
+                ck_x = W_f; ck_y = H_f
+            else:
+                ck_x = 0.0; ck_y = H_f
+            proj = ((ck_x - x0) * dx + (ck_y - y0) * dy) / denom
+            if proj < min_c:
+                min_c = proj
+            if proj > max_c:
+                max_c = proj
+        x0c = x0 + min_c * dx
+        y0c = y0 + min_c * dy
+        x1c = x0 + max_c * dx
+        y1c = y0 + max_c * dy
+        cvx = x1c - x0c
+        cvy = y1c - y0c
+        cdenom = cvx * cvx + cvy * cvy
+        x0c_arr[d] = x0c
+        y0c_arr[d] = y0c
+        vx_arr[d] = cvx
+        vy_arr[d] = cvy
+        cdenom_arr[d] = cdenom
+
+    diff = np.zeros((ndirs, nrp + 2), dtype=np.int32)
+
+    for ic in range(n_cells):
+        # Reset difference array
+        for d in range(ndirs):
+            for k in range(nrp + 2):
+                diff[d, k] = 0
+
+        # Accumulate shadow intervals for each obstacle pixel
+        for ni in range(H):
+            for mi in range(W):
+                v = patches[ic, ni, mi]
+                if math.isnan(v) or v <= threshold:
+                    continue
+
+                # Pixel corners in index space
+                ocx0 = float(mi)
+                ocx1 = float(mi + 1)
+                ocy0 = float(ni)
+                ocy1 = float(ni + 1)
+
+                for d in range(ndirs):
+                    if cdenom_arr[d] == 0.0:
+                        continue
+                    x0c = x0c_arr[d]
+                    y0c = y0c_arr[d]
+                    cvx = vx_arr[d]
+                    cvy = vy_arr[d]
+                    cdenom = cdenom_arr[d]
+
+                    # Project the 4 pixel corners onto the clipped screen
+                    pmin = 2.0
+                    pmax = -1.0
+                    for k in range(4):
+                        if k == 0:
+                            px_k = ocx0; py_k = ocy0
+                        elif k == 1:
+                            px_k = ocx1; py_k = ocy0
+                        elif k == 2:
+                            px_k = ocx1; py_k = ocy1
+                        else:
+                            px_k = ocx0; py_k = ocy1
+                        proj = ((px_k - x0c) * cvx + (py_k - y0c) * cvy) / cdenom
+                        if proj < pmin:
+                            pmin = proj
+                        if proj > pmax:
+                            pmax = proj
+
+                    if pmin < 0.0:
+                        pmin = 0.0
+                    if pmin > 1.0:
+                        pmin = 1.0
+                    if pmax < 0.0:
+                        pmax = 0.0
+                    if pmax > 1.0:
+                        pmax = 1.0
+
+                    i0 = int(pmin * nrp)
+                    i1 = int(pmax * nrp)
+                    if i0 <= nrp:
+                        diff[d, i0] += 1
+                    if i1 <= nrp:
+                        diff[d, i1] -= 1
+
+        # Union-of-intervals: cumsum of diff → covered fraction
+        for d in range(ndirs):
+            covered = 0
+            running = 0
+            for k in range(nrp):
+                running += diff[d, k]
+                if running > 0:
+                    covered += 1
+            result[ic, d] = float(covered) / float(nrp)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

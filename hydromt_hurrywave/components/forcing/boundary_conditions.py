@@ -98,29 +98,23 @@ class HurrywaveBoundaryConditions(ModelComponent):
     @property
     def nr_points(self) -> int:
         """Number of boundary points."""
-        # if self._data is None:
-        #     return 0
-        # if self.data is an empty xr.Dataset, return 0
         if len(self.data.dims) == 0:
             return 0
-        if self.forcing == "timeseries":
-            return int(self.data.sizes.get("index", 0))
-        else:
-            return int(self.data.sizes.get("stations", 0))
+        if "stations" in self.data.dims:
+            return int(self.data.sizes["stations"])
+        return int(self.data.sizes.get("index", 0))
 
     @property
     def gdf(self) -> gpd.GeoDataFrame:
         """Point locations as a GeoDataFrame.
 
-        In *timeseries* mode this is derived from the embedded ``GeoDataset``
-        geometry.  In *spectra* mode coordinates are read from the
-        ``station_x`` / ``station_y`` variables in the dataset.
+        Derived from ``station_x``/``station_y`` variables when the spectra
+        dataset is loaded, otherwise from the ``geometry`` coordinate present
+        after reading the ``.bnd`` file.
         """
         if self.nr_points == 0:
             return gpd.GeoDataFrame()
-        if self.forcing == "timeseries":
-            return self.data.vector.to_gdf().reset_index(drop=True)
-        else:
+        if "station_x" in self.data and "station_y" in self.data:
             xs = self.data["station_x"].values
             ys = self.data["station_y"].values
             names = list(self.data["stations"].values)
@@ -128,6 +122,7 @@ class HurrywaveBoundaryConditions(ModelComponent):
             return gpd.GeoDataFrame(
                 {"name": names}, geometry=points, crs=self.model.crs
             )
+        return self.data.vector.to_gdf().reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # I/O
