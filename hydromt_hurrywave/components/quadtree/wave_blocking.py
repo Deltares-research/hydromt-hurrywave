@@ -113,18 +113,17 @@ class HurrywaveWaveBlocking(ModelComponent):
         Parameters
         ----------
         elevation_list : list
-            *cht_bathymetry* path:
-                List of dataset names / dicts understood by
-                ``bathymetry_database.get_bathymetry_on_grid()``.
-            *HydroMT data-catalog path* (when ``bathymetry_database`` is
-            ``None``):
-                List of dicts with at least an ``"elevation"`` key pointing to
-                a data-catalog entry and optional merge arguments, e.g.::
+            With a *cht_bathymetry* database: list of dataset names / dicts
+            understood by ``bathymetry_database.get_bathymetry_on_grid()``.
+            With the HydroMT data-catalog path (``bathymetry_database`` is
+            ``None``): list of dicts with at least an ``"elevation"`` key
+            pointing to a data-catalog entry and optional merge arguments,
+            e.g.::
 
-                    [
-                        {'elevation': 'gebco'},
-                        {'elevation': 'merit_hydro', 'merge_method': 'first'},
-                    ]
+                [
+                    {'elevation': 'gebco'},
+                    {'elevation': 'merit_hydro', 'merge_method': 'first'},
+                ]
 
         bathymetry_database : object, optional
             cht_bathymetry database object.  When provided, sub-grid

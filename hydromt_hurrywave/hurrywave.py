@@ -193,6 +193,19 @@ class HurrywaveModel(Model):
                 pass
         return script_path
 
+    def clear_spatial_attributes(self) -> None:
+        """Reset all spatial model components to their empty defaults.
+
+        Re-instantiates every component except ``config``, so all grids,
+        masks, geometries and forcing are dropped while the model settings
+        are kept. Used e.g. when the coordinate system is changed and
+        existing spatial data becomes invalid.
+        """
+        for name, cls in self._ALL_COMPONENTS.items():
+            if name == "config":
+                continue
+            self.components[name] = cls(self)
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -202,7 +215,8 @@ class HurrywaveModel(Model):
         """CRS of the model (from the quadtree grid)."""
         try:
             return self.quadtree_grid.crs
-        except (AttributeError, ValueError):
+        except (AttributeError, ValueError, TypeError):
+            # TypeError: xugrid raises it when the dataset holds no grid yet
             return None
 
     @property
