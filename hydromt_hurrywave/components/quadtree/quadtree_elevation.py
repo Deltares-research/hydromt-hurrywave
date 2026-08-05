@@ -402,13 +402,17 @@ class HurrywaveQuadtreeElevation(MeshComponent):
                             continue
                     else:
                         try:
+                            # make_regular_grid expects INDEX BOUNDS for
+                            # mmin/mmax (nx = mmax - mmin), not a size —
+                            # bm0/bm1 are cell bounds, so scale both by the
+                            # pixels-per-cell refinement factor.
                             da_like = make_regular_grid(
                                 x0=x0,
                                 y0=y0,
                                 dx=dxp,
                                 dy=dyp,
-                                mmax=(bm1 - bm0) * refi,
-                                nmax=(bn1 - bn0) * refi,
+                                mmax=bm1 * refi,
+                                nmax=bn1 * refi,
                                 rotation=rotation,
                                 crs=self.model.crs,
                                 mmin=bm0 * refi,

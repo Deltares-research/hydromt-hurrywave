@@ -116,7 +116,7 @@ class HurrywaveConfigVariables(BaseSettings):
     # ---- Advanced numerical options ----
     use_lfactor: bool = Field(False, description="Use L-factor correction", json_schema_extra={"section": "Numerics"})
     explicit: bool = Field(False, description="Use explicit (rather than semi-implicit) update scheme", json_schema_extra={"section": "Numerics"})
-    physics: str = Field("st3", description="Wind physics package: 'st3', 'st4' or 'st6'", json_schema_extra={"always": True, "section": "Physics"})
+    physics: str = Field("st1", description="Wind physics package: 'st1' or 'st6'", json_schema_extra={"always": True, "section": "Physics"})
     #snl_semi_implicit: bool = Field(False, description="Use semi-implicit treatment of SNL interactions")
     swell_dissipation: str = Field("babanin2011", description="Swell dissipation formulation: 'babanin2011' or 'ard2009'", json_schema_extra={"section": "Physics"})
     aopp: float = Field(0.09, description="Coefficient for opposing-swell dissipation", json_schema_extra={"section": "Physics"})
