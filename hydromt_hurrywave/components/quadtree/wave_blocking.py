@@ -298,13 +298,17 @@ class HurrywaveWaveBlocking(ModelComponent):
                     else:
                         # HydroMT data-catalog path
                         try:
+                            # make_regular_grid expects INDEX BOUNDS for
+                            # mmin/mmax (nx = mmax - mmin), not a size —
+                            # bm0/bm1 are cell bounds, so scale both by the
+                            # pixels-per-cell refinement factor.
                             da_like = make_regular_grid(
                                 x0=x0,
                                 y0=y0,
                                 dx=dxp,
                                 dy=dyp,
-                                mmax=(bm1 - bm0) * refi,
-                                nmax=(bn1 - bn0) * refi,
+                                mmax=bm1 * refi,
+                                nmax=bn1 * refi,
                                 rotation=rotation,
                                 crs=self.model.crs,
                                 mmin=bm0 * refi,
@@ -349,7 +353,10 @@ class HurrywaveWaveBlocking(ModelComponent):
                         nn = (n[idx] - bn0) * refi
                         mm = (m[idx] - bm0) * refi
                         zgc = zg[nn: nn + refi, mm: mm + refi]
-                        # BUG, somehow zbc can be empty, causing np.nanmax to raise an error.  Skip such cells.
+                        # Skip cells with no usable elevation data (empty
+                        # slice or all-NaN) — np.nanmax would raise / warn
+                        if zgc.size == 0 or np.all(np.isnan(zgc)):
+                            continue
                         if np.nanmax(zgc) < threshold_level:
                             # No obstacle above threshold → no blocking
                             continue
